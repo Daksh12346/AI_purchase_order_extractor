@@ -397,7 +397,7 @@
 <div class="container">
   <div class="header-box">
     <h1>AI Purchase Order Extractor</h1>
-    <p class="subtitle">Picks Exact Gmail Email Date</p>
+    <p class="subtitle">Extracts All Purchase Orders, Work Orders & Procurement Files</p>
 
     <div class="api-key-box">
       <label for="apiKeyInput" style="font-size: 13px; font-weight: 600;">Gemini API Key:</label>
@@ -554,7 +554,6 @@
   const btnYesterday = document.getElementById('btnYesterday');
   const btnLast7 = document.getElementById('btnLast7');
 
-  // Active production endpoints in priority order
   const FAST_MODELS = [
     "gemini-3.5-flash-lite",
     "gemini-3.8-flash",
@@ -630,8 +629,8 @@
   function isExplicitlyNonPoFile(filename) {
     if (!filename || typeof filename !== 'string') return false;
     const lower = filename.toLowerCase();
-    const blockedTerms = ['tax invoice', 'invoice', 'quotation', 'challan', 'receipt', 'bill_'];
-    const poTerms = ['purchase_order', 'purchase order', 'po_', '-po', '_po.'];
+    const blockedTerms = ['tax invoice', 'retail invoice', 'delivery challan', 'salary slip', 'receipt_'];
+    const poTerms = ['purchase', 'order', 'po', 'indent', 'quotation', 'rfq', 'so'];
     if (poTerms.some(t => lower.includes(t))) return false;
     return blockedTerms.some(t => lower.includes(t));
   }
@@ -663,7 +662,7 @@
         }
       }
     }
-    return "";
+    return candidate || "";
   }
 
   function parseFlexibleDate(dateStr) {
@@ -797,7 +796,6 @@
   });
 
   async function processPdfItems(fileList, apiKey, alreadyProcessedSet = new Set(), forceReprocess = false) {
-    let currentTotal = tableBody.querySelectorAll('tr').length;
     let newlyExtracted = 0;
     let skippedCount = 0;
     let duplicateSkipped = 0;
@@ -810,8 +808,8 @@
 
       if (isExplicitlyNonPoFile(fileName)) {
         skippedCount++;
-        statusText.textContent = `Skipped non-PO file: ${fileName}`;
-        await sleep(150);
+        statusText.textContent = `Skipped non-order document: ${fileName}`;
+        await sleep(50);
         continue;
       }
 
@@ -822,26 +820,24 @@
 
         if (!extractedData || extractedData.isPurchaseOrder === false) {
           skippedCount++;
-          statusText.textContent = `Ignored (Not a PO): ${fileName}`;
-          await sleep(150);
+          statusText.textContent = `Ignored (Not an Order): ${fileName}`;
+          await sleep(50);
           continue;
         }
 
         const extractedPoNo = String(extractedData.poNo || "").trim().toUpperCase();
 
-        // Check 1: Agar table me pehle se displayed hai toh dubara append nahi hoga
         if (extractedPoNo && displayedPOs.has(extractedPoNo)) {
           duplicateSkipped++;
-          statusText.textContent = `PO already visible on table: ${extractedPoNo}`;
-          await sleep(200);
+          statusText.textContent = `Already displayed: ${extractedPoNo}`;
+          await sleep(50);
           continue;
         }
 
-        // Check 2: Agar re-process checkbox off hai aur pehle se saved record hai
         if (!forceReprocess && extractedPoNo && alreadyProcessedSet.has(extractedPoNo)) {
           duplicateSkipped++;
-          statusText.textContent = `Skipping existing processed PO: ${extractedPoNo}`;
-          await sleep(200);
+          statusText.textContent = `Skipping saved PO: ${extractedPoNo}`;
+          await sleep(50);
           continue;
         }
 
@@ -861,8 +857,9 @@
 
           const finalDate = fileObj.email_date || extractedData.date || "";
 
+          // TURANT DISPLAY: Har line item nikalte hi table me inject ho jayega
           extractedData.items.forEach(item => {
-            currentTotal++;
+            const currentTotal = tableBody.querySelectorAll('tr').length + 1;
             newlyExtracted++;
 
             const finalPartNo = detectAndValidatePartNumber(item.partNo, item.desc);
@@ -884,26 +881,28 @@
               source: fileName
             });
           });
+
+          // Table aur Metrics card live update turant ho jayenge
+          updateNumbersAndCount();
+
+          // Turant backend par record mark kar do taaki reload me save rahe
+          if (extractedPoNo && !forceReprocess) {
+            fetch(`${BACKEND_BASE}/mark-processed`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ po_numbers: [extractedPoNo] })
+            }).catch(() => {});
+          }
         }
-        await sleep(1500); // Prevents free tier per-minute quotas from immediate 429
+        await sleep(1000);
       } catch (docErr) {
         skippedCount++;
         statusText.textContent = `Error reading ${fileName}: ${docErr.message}`;
-        await sleep(1000);
+        await sleep(500);
       }
     }
 
-    if (newPosToRecord.size > 0 && !forceReprocess) {
-      try {
-        await fetch(`${BACKEND_BASE}/mark-processed`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ po_numbers: Array.from(newPosToRecord) })
-        });
-      } catch (e) {}
-    }
-
-    updateNumbersAndCount();
+    statusText.textContent = `Done! Added ${newlyExtracted} item(s). Skipped ${duplicateSkipped} duplicate(s).`;
     return { newlyExtracted, skippedCount, duplicateSkipped };
   }
 
@@ -961,8 +960,7 @@
         email_date: f.email_date 
       }));
 
-      const result = await processPdfItems(files, apiKey, alreadyProcessed, forceReprocess);
-      statusText.textContent = `Completed! Extracted ${result.newlyExtracted} item(s). Skipped ${result.duplicateSkipped} duplicate/existing PO(s).`;
+      await processPdfItems(files, apiKey, alreadyProcessed, forceReprocess);
     } catch (err) {
       alert("Error: " + err.message);
       statusText.textContent = "Error: " + err.message;
@@ -994,8 +992,7 @@
         fileList.push({ name: file.name, filename: file.name, base64: base64, email_date: "" });
       }
 
-      const result = await processPdfItems(fileList, apiKey, alreadyProcessed, true);
-      statusText.textContent = `Done! Added ${result.newlyExtracted} items.`;
+      await processPdfItems(fileList, apiKey, alreadyProcessed, true);
       pdfInput.value = '';
     } catch (err) {
       alert("Error: " + err.message);
@@ -1015,46 +1012,50 @@
   }
 
   async function callGeminiAIWithRetry(apiKey, base64Pdf) {
-    const prompt = `You are an automated, high-precision Purchase Order (PO) document filter and extractor.
+    const prompt = `You are an expert purchase order and procurement data extractor.
+Analyze this document thoroughly.
 
-CRITICAL DOCUMENT TYPE VALIDATION:
-- Check if this document is strictly a "PURCHASE ORDER" (or Work Order / Service Order / Purchase Requisition issued by a buyer).
-- If this document is a TAX INVOICE, RETAIL INVOICE, QUOTATION, PROFORMA INVOICE, DELIVERY CHALLAN, STATEMENT, or RECEIPT:
-  Immediately return:
+EXTRACTION SCOPE:
+- Check if this document represents an ORDER, PURCHASE ORDER, WORK ORDER, SERVICE ORDER, INDENT, PROCUREMENT ORDER, or CONTRACT.
+- If it is purely a TAX INVOICE, PAYMENT RECEIPT, or DELIVERY CHALLAN without any order info, return:
   {
     "isPurchaseOrder": false,
-    "documentType": "INVOICE_OR_OTHER",
     "items": []
   }
 
-IF AND ONLY IF IT IS A VALID PURCHASE ORDER:
-1. Set "isPurchaseOrder": true.
-2. "companyName": Buyer company issuing the PO. NEVER output vendor.
-3. "partNo" STRICT RULES: Extract ONLY genuine manufacturer Cat No/Part No. NO internal item codes.
-4. "companyAddress": Full buyer address.
-5. "poNo": Purchase Order number.
-6. "date": PO Date (Format: YYYY-MM-DD).
-7. For each item in "items", extract qty, unit, rate, discountPercent, discountAmount, amount.
+EXTRACTION INSTRUCTIONS:
+1. "isPurchaseOrder": true if it contains items/services being ordered or purchased.
+2. "companyName": The Buyer/Customer/Client company issuing or placing the order.
+3. "companyAddress": The buyer or site address.
+4. "poNo": The PO Number, Order Number, or Reference ID.
+5. "date": Date of the order (Format: YYYY-MM-DD).
+6. "items": List EVERY line item/product/service in the document table with:
+   - "partNo": Manufacturer catalogue/part/item code if present, otherwise empty.
+   - "desc": Item description/name.
+   - "qty": Quantity (e.g. "10", "1").
+   - "unit": Unit of measurement (e.g. "NOS", "SET", "MTR").
+   - "rate": Unit price/rate.
+   - "discountPercent": Percentage discount if mentioned (default "0").
+   - "discountAmount": Discount amount if mentioned (default "0").
+   - "amount": Total amount for that line item.
 
-OUTPUT STRICT JSON ONLY:
+OUTPUT ONLY CLEAN VALID JSON:
 {
   "isPurchaseOrder": true,
-  "documentType": "PURCHASE_ORDER",
-  "companyName": "BUYER_COMPANY",
-  "buyerCompany": "BUYER_COMPANY",
-  "companyAddress": "BUYER_ADDRESS",
+  "companyName": "BUYER_NAME",
+  "companyAddress": "ADDRESS",
   "poNo": "PO_NUMBER",
   "date": "YYYY-MM-DD",
   "items": [
-    { 
-      "partNo": "", 
-      "desc": "description", 
-      "qty": "1", 
-      "unit": "NOS", 
-      "rate": "0", 
-      "discountPercent": "0", 
-      "discountAmount": "0", 
-      "amount": "0" 
+    {
+      "partNo": "",
+      "desc": "Item Name",
+      "qty": "1",
+      "unit": "NOS",
+      "rate": "0",
+      "discountPercent": "0",
+      "discountAmount": "0",
+      "amount": "0"
     }
   ]
 }`;
@@ -1110,7 +1111,7 @@ OUTPUT STRICT JSON ONLY:
           }
           
           lastError = errMsg;
-          break; // Try next fallback model
+          break;
         } catch (netErr) {
           lastError = netErr.message;
           await sleep(500);
