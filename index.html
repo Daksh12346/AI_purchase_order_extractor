@@ -1,1269 +1,237 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AI Purchase Order Extractor</title>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+import imaplib
+import email
+from email.header import decode_header
+from email.utils import parsedate_to_datetime
+import base64
+from datetime import datetime, timedelta
+from typing import Optional, List, Set
+import os
+import json
 
-  <style>
-    :root {
-      --primary: #0F6B5C;
-      --primary-dark: #0B4F44;
-      --border: #D9DEE3;
-      --bg: #F4F6F8;
-      --ink: #16202A;
-      --ink-muted: #6B7280;
-    }
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+from fastapi.concurrency import run_in_threadpool
+from pydantic import BaseModel
+import uvicorn
 
-    * { box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: var(--bg);
-      color: var(--ink);
-      margin: 0;
-      padding: 24px 16px;
-    }
+app = FastAPI(title="AI Purchase Order Extractor System")
 
-    .container {
-      max-width: 1600px;
-      margin: 0 auto;
-    }
+# Clean CORS setup
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-    .header-box {
-      background: #fff;
-      padding: 22px;
-      border-radius: 8px;
-      border: 1px solid var(--border);
-      box-shadow: 0 1px 4px rgba(0,0,0,0.05);
-      margin-bottom: 20px;
-    }
+PROCESSED_FILE = "processed_po.json"
+MAX_FETCH_EMAILS = 15
+MAX_FILE_SIZE_MB = 15
 
-    h1 {
-      margin: 0 0 6px 0;
-      font-size: 21px;
-      color: var(--primary);
-    }
 
-    p.subtitle {
-      margin: 0 0 16px 0;
-      font-size: 13px;
-      color: var(--ink-muted);
-    }
+def get_processed_pos() -> Set[str]:
+    if os.path.exists(PROCESSED_FILE):
+        try:
+            with open(PROCESSED_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return set(data.get("po_numbers", []))
+        except Exception:
+            return set()
+    return set()
 
-    .api-key-box {
-      margin-bottom: 16px;
-      display: flex;
-      gap: 12px;
-      align-items: center;
-      flex-wrap: wrap;
-    }
 
-    .api-key-box input {
-      flex: 1;
-      min-width: 260px;
-      padding: 9px 12px;
-      border: 1px solid var(--border);
-      border-radius: 5px;
-      font-size: 13px;
-      font-family: monospace;
-    }
+def save_processed_pos(new_pos: List[str]):
+    existing = get_processed_pos()
+    for po in new_pos:
+        if po and po.strip():
+            existing.add(po.strip().upper())
+    with open(PROCESSED_FILE, "w", encoding="utf-8") as f:
+        json.dump({"po_numbers": list(existing)}, f, indent=2)
 
-    .filter-section-pre {
-      background: #F8FAF9;
-      border: 1.5px solid #C1DDD6;
-      border-radius: 6px;
-      padding: 16px 20px;
-      margin-bottom: 16px;
-    }
 
-    .section-title {
-      font-size: 13.5px;
-      font-weight: 700;
-      color: var(--primary-dark);
-      margin-bottom: 12px;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
+class GmailFetchRequest(BaseModel):
+    email: str
+    password: str
+    filter_type: str = "PO_ONLY"
+    date_from: Optional[str] = ""
+    date_to: Optional[str] = ""
+    query: Optional[str] = ""
+    force_reprocess: Optional[bool] = False
 
-    .quick-day-buttons {
-      display: flex;
-      gap: 8px;
-      margin-bottom: 12px;
-      flex-wrap: wrap;
-    }
 
-    .btn-day {
-      background: #fff;
-      border: 1px solid var(--primary);
-      color: var(--primary);
-      padding: 6px 14px;
-      font-size: 12px;
-      font-weight: 600;
-      border-radius: 4px;
-      cursor: pointer;
-    }
-    .btn-day:hover {
-      background: var(--primary);
-      color: #fff;
-    }
+class MarkProcessedRequest(BaseModel):
+    po_numbers: List[str]
 
-    .filter-inputs-grid {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
-      align-items: flex-end;
-    }
 
-    .filter-field {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-    }
+def decode_mime_words(s: str) -> str:
+    if not s:
+        return ""
+    decoded_fragments = decode_header(s)
+    output = []
+    for fragment, encoding in decoded_fragments:
+        if isinstance(fragment, bytes):
+            try:
+                output.append(fragment.decode(encoding or "utf-8", errors="ignore"))
+            except Exception:
+                output.append(fragment.decode("latin1", errors="ignore"))
+        else:
+            output.append(str(fragment))
+    return "".join(output)
 
-    .filter-field label {
-      font-size: 11px;
-      font-weight: 700;
-      color: var(--ink-muted);
-      text-transform: uppercase;
-    }
 
-    .filter-field input {
-      padding: 8px 10px;
-      border: 1px solid var(--border);
-      border-radius: 5px;
-      font-size: 12.5px;
-      background: #fff;
-    }
+def sync_fetch_po_pdfs(req: GmailFetchRequest) -> dict:
+    user_email = req.email.strip()
+    app_password = req.password.strip().replace(" ", "")
 
-    .filter-field input:focus {
-      outline: none;
-      border-color: var(--primary);
-    }
+    if not user_email or not app_password:
+        raise HTTPException(
+            status_code=400, detail="Gmail address and 16-character App Password are required."
+        )
 
-    .gmail-box {
-      background: #EBF3F2;
-      border: 1px solid #B2D8D1;
-      border-radius: 6px;
-      padding: 14px 18px;
-      margin-bottom: 16px;
-    }
+    mail = None
+    try:
+        mail = imaplib.IMAP4_SSL("imap.gmail.com")
+        mail.login(user_email, app_password)
+        mail.select("inbox")
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Gmail Login Failed: {str(e)}")
 
-    .gmail-inputs {
-      display: flex;
-      gap: 10px;
-      align-items: center;
-      flex-wrap: wrap;
-    }
+    try:
+        gmail_query_parts = ["filename:pdf", "has:attachment"]
 
-    .gmail-inputs input {
-      padding: 8px 12px;
-      border: 1px solid var(--border);
-      border-radius: 5px;
-      font-size: 13px;
-      font-family: monospace;
-    }
+        if req.date_from and req.date_from.strip():
+            d_from = req.date_from.strip().replace("-", "/")
+            gmail_query_parts.append(f"after:{d_from}")
 
-    .reprocess-toggle {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 12.5px;
-      font-weight: 600;
-      color: #B45309;
-      background: #FEF3C7;
-      padding: 6px 10px;
-      border-radius: 4px;
-      border: 1px solid #FCD34D;
-    }
+        if req.date_to and req.date_to.strip():
+            try:
+                dt_to = datetime.strptime(req.date_to.strip(), "%Y-%m-%d") + timedelta(days=1)
+                d_to_str = dt_to.strftime("%Y/%m/%d")
+                gmail_query_parts.append(f"before:{d_to_str}")
+            except ValueError:
+                pass
 
-    .upload-zone {
-      border: 2px dashed var(--border);
-      padding: 16px;
-      background: #FAFBFC;
-      border-radius: 6px;
-      text-align: center;
-      margin-bottom: 14px;
-    }
+        # Robust sanitation for spaces/hyphens in PO number & Company names
+        if req.query and req.query.strip():
+            raw_q = req.query.strip().replace('"', '').replace("'", "")
+            gmail_query_parts.append(f'({raw_q})')
 
-    input[type="file"] {
-      font-size: 13.5px;
-      cursor: pointer;
-    }
-
-    .action-buttons {
-      display: flex;
-      gap: 10px;
-      align-items: center;
-      margin-top: 10px;
-      flex-wrap: wrap;
-    }
-
-    .btn-main {
-      background: var(--primary);
-      color: white;
-      border: none;
-      padding: 10px 22px;
-      font-size: 14px;
-      font-weight: 600;
-      border-radius: 5px;
-      cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-    }
-    .btn-main:hover { background: var(--primary-dark); }
-    .btn-main:disabled { background: #A8B0B8; cursor: not-allowed; }
-
-    .btn-gmail { background: #1A73E8; }
-    .btn-gmail:hover { background: #1557B0; }
-
-    .btn-search {
-      background: #2D3748;
-      height: 35px;
-      padding: 8px 16px;
-      font-size: 13px;
-    }
-    .btn-search:hover { background: #1A202C; }
-
-    .btn-reset {
-      background: #E2E8F0;
-      color: var(--ink);
-      border: 1px solid var(--border);
-      padding: 8px 14px;
-      border-radius: 5px;
-      font-size: 13px;
-      cursor: pointer;
-      font-weight: 600;
-      height: 35px;
-    }
-    .btn-reset:hover { background: #CBD5E0; }
-
-    .status-text {
-      margin-top: 12px;
-      font-size: 13px;
-      color: var(--ink-muted);
-      font-family: monospace;
-      font-weight: bold;
-    }
-
-    .metrics-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-      gap: 12px;
-      margin-bottom: 16px;
-    }
-
-    .metric-card {
-      background: #fff;
-      padding: 14px 18px;
-      border-radius: 8px;
-      border: 1px solid var(--border);
-      box-shadow: 0 1px 3px rgba(0,0,0,0.04);
-    }
-
-    .metric-label {
-      font-size: 12px;
-      color: var(--ink-muted);
-      text-transform: uppercase;
-      font-weight: 600;
-    }
-
-    .metric-value {
-      font-size: 22px;
-      font-weight: 700;
-      color: var(--primary);
-      margin-top: 4px;
-    }
-
-    .table-box {
-      background: #fff;
-      border-radius: 8px;
-      border: 1px solid var(--border);
-      box-shadow: 0 1px 4px rgba(0,0,0,0.05);
-      overflow: hidden;
-      display: none;
-    }
-
-    .table-head-bar {
-      padding: 14px 18px;
-      border-bottom: 1px solid var(--border);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-
-    .table-head-bar h2 {
-      margin: 0;
-      font-size: 16px;
-    }
-
-    .table-scroll {
-      overflow-x: auto;
-      max-height: 580px;
-    }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 12.5px;
-    }
-
-    thead th {
-      position: sticky;
-      top: 0;
-      background: #F8F9FA;
-      text-align: left;
-      padding: 10px 12px;
-      border-bottom: 1.5px solid var(--border);
-      font-size: 11px;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      white-space: nowrap;
-      color: var(--ink);
-      z-index: 1;
-    }
-
-    tbody td {
-      border-bottom: 1px solid var(--border);
-      padding: 0;
-    }
-
-    tbody tr:nth-child(even) td { background: #FAFBFC; }
-
-    td input {
-      width: 100%;
-      border: none;
-      background: transparent;
-      padding: 8px 10px;
-      font-size: 12.5px;
-      color: var(--ink);
-      font-family: monospace;
-    }
-
-    td input:focus {
-      background: #E4F1EE;
-      outline: none;
-    }
-
-    td.del {
-      text-align: center;
-      cursor: pointer;
-      color: #999;
-      font-size: 15px;
-      width: 36px;
-    }
-    td.del:hover { color: #A32E27; }
-
-    .table-foot-bar {
-      padding: 12px 18px;
-      border-top: 1px solid var(--border);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 10px;
-    }
-
-    .btn-group-left {
-      display: flex;
-      gap: 8px;
-      align-items: center;
-    }
-
-    .btn-secondary {
-      background: transparent;
-      color: var(--ink);
-      border: 1px solid var(--border);
-      padding: 8px 14px;
-      font-size: 13px;
-      font-weight: 600;
-      border-radius: 4px;
-      cursor: pointer;
-    }
-    .btn-secondary:hover { background: #EFEFEF; }
-    .btn-danger {
-      border-color: #e57373;
-      color: #c62828;
-    }
-    .btn-danger:hover {
-      background: #ffebee;
-    }
-  </style>
-</head>
-<body>
-
-<div class="container">
-  <div class="header-box">
-    <h1>AI Purchase Order Extractor</h1>
-    <p class="subtitle">Direct High-Speed Multimodal Analysis (Picks Exact Gmail Email Date)</p>
-
-    <div class="api-key-box">
-      <label for="apiKeyInput" style="font-size: 13px; font-weight: 600;">Gemini API Key:</label>
-      <input type="password" id="apiKeyInput" placeholder="Enter your Gemini API Key here...">
-    </div>
-
-    <div class="filter-section-pre">
-      <div class="section-title">📅 Select Gmail Date / Range</div>
-
-      <div class="quick-day-buttons">
-        <button type="button" class="btn-day" id="btnToday">⚡ Today</button>
-        <button type="button" class="btn-day" id="btnYesterday">⏮ Yesterday</button>
-        <button type="button" class="btn-day" id="btnLast7">📅 Last 7 Days</button>
-      </div>
-
-      <div class="filter-inputs-grid">
-        <div class="filter-field">
-          <label>From Date:</label>
-          <input type="date" id="dateFromFilter">
-        </div>
-        <div class="filter-field">
-          <label>To Date:</label>
-          <input type="date" id="dateToFilter">
-        </div>
-        <div class="filter-field">
-          <label>Find by Month:</label>
-          <input type="month" id="monthFilter">
-        </div>
-        <div class="filter-field" style="flex: 1; min-width: 220px;">
-          <label>Search (PO No / Company / Part / Keyword):</label>
-          <input type="text" id="searchInput" placeholder="Search keyword in Gmail or Table...">
-        </div>
-        <button type="button" class="btn-main btn-search" id="applySearchBtn">🔍 Search Table</button>
-        <button type="button" class="btn-reset" id="resetFilterBtn">Reset</button>
-      </div>
-    </div>
-
-    <div class="gmail-box">
-      <div class="section-title">📥 Automated Gmail Sync</div>
-      <div class="gmail-inputs">
-        <input type="text" id="gmailEmail" placeholder="Gmail Address">
-        <input type="password" id="gmailPassword" placeholder="16-digit App Password">
+        full_raw_query = " ".join(gmail_query_parts)
         
-        <label class="reprocess-toggle">
-          <input type="checkbox" id="forceReprocessCheck"> Force re-read already processed POs
-        </label>
+        status, message_numbers = mail.uid("search", None, 'X-GM-RAW', f'"{full_raw_query}"')
 
-        <button type="button" class="btn-main btn-gmail" id="fetchGmailBtn">🔍 Fetch & Extract from Gmail</button>
-      </div>
-    </div>
+        if status != "OK" or not message_numbers[0]:
+            return {"files": [], "message": "No emails found matching criteria."}
 
-    <div class="upload-zone">
-      <input type="file" id="pdfInput" accept=".pdf,application/pdf" multiple>
-      <div style="font-size: 12px; color: #888; margin-top: 6px;">Upload Purchase Order PDFs manually</div>
-    </div>
+        email_uids = message_numbers[0].split()
+        recent_uids = email_uids[-MAX_FETCH_EMAILS:]
+        recent_uids.reverse()
 
-    <div class="action-buttons">
-      <button type="button" class="btn-main" id="processBtn">Extract Local Files</button>
-      <button type="button" class="btn-secondary" id="clearHistoryBtn" title="Deletes backend memory of processed POs">🗑 Reset Processed PO History</button>
-    </div>
+        extracted_files = []
 
-    <div class="status-text" id="statusText">Select dates and click "Fetch & Extract from Gmail"...</div>
-  </div>
+        for uid in recent_uids:
+            res, msg_data = mail.uid("fetch", uid, "(RFC822)")
+            if res != "OK":
+                continue
 
-  <div class="metrics-grid" id="metricsGrid" style="display: none;">
-    <div class="metric-card">
-      <div class="metric-label">Total Unique POs</div>
-      <div class="metric-value" id="totalPosCount">0</div>
-    </div>
-    <div class="metric-card">
-      <div class="metric-label">Total Line Items</div>
-      <div class="metric-value" id="totalItemsCount">0</div>
-    </div>
-    <div class="metric-card">
-      <div class="metric-label">Total Order Value (₹)</div>
-      <div class="metric-value" id="totalValueCount">0.00</div>
-    </div>
-  </div>
+            for response_part in msg_data:
+                if not isinstance(response_part, tuple):
+                    continue
 
-  <div class="table-box" id="tableBox">
-    <div class="table-head-bar">
-      <h2>Extracted Records</h2>
-      <span style="font-size: 12.5px; color: var(--ink-muted);" id="itemCountLabel">0 records</span>
-    </div>
+                msg = email.message_from_bytes(response_part[1])
 
-    <div class="table-scroll">
-      <table id="mainTable">
-        <thead>
-          <tr id="headerRow">
-            <th data-key="sNo" style="width: 55px;">S.No</th>
-            <th data-key="company" style="min-width: 210px;">Company Name</th>
-            <th data-key="address" style="min-width: 220px;">Company Address</th>
-            <th data-key="poNo" style="min-width: 150px;">PO / Order No</th>
-            <th data-key="date" style="min-width: 110px;">Gmail Date</th>
-            <th data-key="partNo" style="min-width: 160px;">Part Number</th>
-            <th data-key="desc" style="min-width: 300px;">Description</th>
-            <th data-key="qty" style="min-width: 70px;">Qty</th>
-            <th data-key="unit" style="min-width: 70px;">Unit</th>
-            <th data-key="rate" style="min-width: 90px;">Rate</th>
-            <th data-key="discountPercent" style="min-width: 110px;">Discount (%)</th>
-            <th data-key="discountAmount" style="min-width: 120px;">Discount Amount</th>
-            <th data-key="amount" style="min-width: 105px;">Amount</th>
-            <th data-key="source" style="min-width: 140px;">Source File</th>
-            <th class="action-col" style="width: 32px;"></th>
-          </tr>
-        </thead>
-        <tbody id="tableBody"></tbody>
-      </table>
-    </div>
+                email_date_str = ""
+                raw_date_hdr = msg.get("Date")
+                if raw_date_hdr:
+                    try:
+                        parsed_dt = parsedate_to_datetime(raw_date_hdr)
+                        email_date_str = parsed_dt.strftime("%Y-%m-%d")
+                    except Exception:
+                        email_date_str = ""
 
-    <div class="table-foot-bar">
-      <div class="btn-group-left">
-        <button type="button" class="btn-secondary" id="addRowBtn">+ Add Row</button>
-        <button type="button" class="btn-secondary" id="addColBtn">+ Add Column</button>
-        <button type="button" class="btn-secondary btn-danger" id="clearBtn">Clear Table</button>
-      </div>
-      <button type="button" class="btn-main" id="downloadBtn">Download Excel (.xlsx)</button>
-    </div>
-  </div>
-</div>
+                for part in msg.walk():
+                    if (
+                        part.get_content_maintype() == "multipart"
+                        or part.get("Content-Disposition") is None
+                    ):
+                        continue
 
-<script>
-  const apiKeyInput = document.getElementById('apiKeyInput');
-  const gmailEmail = document.getElementById('gmailEmail');
-  const gmailPassword = document.getElementById('gmailPassword');
-  const fetchGmailBtn = document.getElementById('fetchGmailBtn');
-  const forceReprocessCheck = document.getElementById('forceReprocessCheck');
-  const clearHistoryBtn = document.getElementById('clearHistoryBtn');
-  const pdfInput = document.getElementById('pdfInput');
-  const processBtn = document.getElementById('processBtn');
-  const statusText = document.getElementById('statusText');
-  const tableBox = document.getElementById('tableBox');
-  const tableBody = document.getElementById('tableBody');
-  const headerRow = document.getElementById('headerRow');
-  const itemCountLabel = document.getElementById('itemCountLabel');
-  const addRowBtn = document.getElementById('addRowBtn');
-  const addColBtn = document.getElementById('addColBtn');
-  const clearBtn = document.getElementById('clearBtn');
-  const downloadBtn = document.getElementById('downloadBtn');
+                    filename = part.get_filename()
+                    if not filename:
+                        continue
 
-  const metricsGrid = document.getElementById('metricsGrid');
-  const totalPosCount = document.getElementById('totalPosCount');
-  const totalItemsCount = document.getElementById('totalItemsCount');
-  const totalValueCount = document.getElementById('totalValueCount');
-  
-  const searchInput = document.getElementById('searchInput');
-  const monthFilter = document.getElementById('monthFilter');
-  const dateFromFilter = document.getElementById('dateFromFilter');
-  const dateToFilter = document.getElementById('dateToFilter');
-  const applySearchBtn = document.getElementById('applySearchBtn');
-  const resetFilterBtn = document.getElementById('resetFilterBtn');
+                    filename = decode_mime_words(filename).strip()
 
-  const btnToday = document.getElementById('btnToday');
-  const btnYesterday = document.getElementById('btnYesterday');
-  const btnLast7 = document.getElementById('btnLast7');
+                    if filename.lower().endswith(".pdf"):
+                        payload = part.get_payload(decode=True)
+                        if payload:
+                            if len(payload) > MAX_FILE_SIZE_MB * 1024 * 1024:
+                                continue
 
-  // Latest verified active models as recommended by Google API
-  const FAST_MODELS = [
-    "gemini-3.5-flash-lite",
-    "gemini-3.8-flash",
-    "gemini-3.5-flash"
-  ];
-  const BACKEND_BASE = window.location.origin;
+                            b64_str = base64.b64encode(payload).decode("utf-8")
+                            extracted_files.append({
+                                "filename": filename,
+                                "base64": b64_str,
+                                "email_date": email_date_str,
+                            })
 
-  if (localStorage.getItem('gemini_api_key')) apiKeyInput.value = localStorage.getItem('gemini_api_key');
-  if (localStorage.getItem('gmail_email')) gmailEmail.value = localStorage.getItem('gmail_email');
+        saved_pos = [] if req.force_reprocess else list(get_processed_pos())
 
-  apiKeyInput.addEventListener('input', () => localStorage.setItem('gemini_api_key', apiKeyInput.value.trim()));
-  gmailEmail.addEventListener('input', () => localStorage.setItem('gmail_email', gmailEmail.value.trim()));
-
-  const sleep = ms => new Promise(res => setTimeout(res, ms));
-
-  function formatDateToISO(d) {
-    const year = d.getFullYear();
-    const month = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
-  }
-
-  btnToday.addEventListener('click', () => {
-    const today = formatDateToISO(new Date());
-    dateFromFilter.value = today;
-    dateToFilter.value = today;
-    monthFilter.value = '';
-    updateNumbersAndCount();
-  });
-
-  btnYesterday.addEventListener('click', () => {
-    const y = new Date();
-    y.setDate(y.getDate() - 1);
-    const yStr = formatDateToISO(y);
-    dateFromFilter.value = yStr;
-    dateToFilter.value = yStr;
-    monthFilter.value = '';
-    updateNumbersAndCount();
-  });
-
-  btnLast7.addEventListener('click', () => {
-    const now = new Date();
-    const past = new Date();
-    past.setDate(past.getDate() - 7);
-    dateFromFilter.value = formatDateToISO(past);
-    dateToFilter.value = formatDateToISO(now);
-    monthFilter.value = '';
-    updateNumbersAndCount();
-  });
-
-  clearHistoryBtn.addEventListener('click', async () => {
-    if (confirm("Reset backend PO memory? Skipped POs will be allowed to extract again.")) {
-      try {
-        await fetch(`${BACKEND_BASE}/clear-history`, { method: "POST" });
-        alert("Processed PO history cleared!");
-      } catch (e) {
-        alert("Error connecting to backend: " + e.message);
-      }
-    }
-  });
-
-  async function countdownWait(seconds, reason = "Rate limit hit") {
-    let remaining = Math.ceil(seconds);
-    while (remaining > 0) {
-      statusText.textContent = `⏳ ${reason}. Waiting ${remaining}s before auto-retrying...`;
-      await sleep(1000);
-      remaining--;
-    }
-  }
-
-  function isExplicitlyNonPoFile(filename) {
-    if (!filename || typeof filename !== 'string') return false;
-    const lower = filename.toLowerCase();
-    const blockedTerms = ['tax invoice', 'invoice', 'quotation', 'challan', 'receipt', 'bill_'];
-    const poTerms = ['purchase_order', 'purchase order', 'po_', '-po', '_po.'];
-    if (poTerms.some(t => lower.includes(t))) return false;
-    return blockedTerms.some(t => lower.includes(t));
-  }
-
-  function detectAndValidatePartNumber(aiPartNo, descText) {
-    let candidate = (aiPartNo || "").trim();
-
-    if (candidate) {
-      if (/^(11[A-Z0-9]+|ITM\w*|MAT\w*|IND\w*|ITEM\w*|CODE\w*)$/i.test(candidate)) candidate = "";
-      else if (/^(\d+P-\d+A|\d+A|\d+X\d+|\d+V|\d+KW|\d+HP|\d+K|\d+-WAY|\d+MM)$/i.test(candidate)) candidate = "";
-      else if (/^(SCHNEIDER|SIEMENS|L&T|ABB|HAVELLS|LEGRAND|NOS|SET|PCS|EA)$/i.test(candidate)) candidate = "";
-    }
-
-    const isIndustrialPattern = /^(3[A-Z0-9]{2,4}[A-Z0-9-]{4,}|[A-Z]{2,4}\d{2,}[A-Z0-9-]*|[A-Z]{4,}\d{2,}[A-Z0-9]*)$/i;
-    if (candidate && isIndustrialPattern.test(candidate)) {
-      return candidate;
-    }
-
-    if (descText) {
-      const words = String(descText).split(/[\s,;()]+/);
-      for (let word of words) {
-        let cleanWord = word.trim().replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, '');
-        if (/^(\d+P-\d+A|\d+A|\d+V|\d+KW|\d+HP|\d+K|\d+-WAY|\d+X\d+|\d+MM)$/i.test(cleanWord)) continue;
-        if (/^(SCHNEIDER|SIEMENS|L&T|ABB|HAVELLS|LEGRAND|NOS|SET|PCS)$/i.test(cleanWord)) continue;
-        if (/^(11[A-Z0-9]+|ITM\w*|MAT\w*|IND\w*|ITEM\w*)/i.test(cleanWord)) continue;
-
-        if (isIndustrialPattern.test(cleanWord)) {
-          return cleanWord;
-        }
-      }
-    }
-    return "";
-  }
-
-  function parseFlexibleDate(dateStr) {
-    if (!dateStr) return null;
-    const clean = String(dateStr).trim().replace(/[./]/g, '-');
-    if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(clean)) {
-      const parts = clean.split('-');
-      return new Date(parts[0], parts[1] - 1, parts[2]);
-    }
-    if (/^\d{1,2}-\d{1,2}-\d{4}$/.test(clean)) {
-      const parts = clean.split('-');
-      return new Date(parts[2], parts[1] - 1, parts[0]);
-    }
-    const d = new Date(dateStr);
-    return isNaN(d.getTime()) ? null : d;
-  }
-
-  function getActiveFilterBounds() {
-    let from = dateFromFilter.value;
-    let to = dateToFilter.value;
-
-    const monthVal = monthFilter.value;
-    if (monthVal && !from && !to) {
-      const parts = monthVal.split('-');
-      const y = parseInt(parts[0], 10);
-      const m = parseInt(parts[1], 10);
-      from = `${y}-${String(m).padStart(2, '0')}-01`;
-      const lastDay = new Date(y, m, 0).getDate();
-      to = `${y}-${String(m).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
-    }
-
-    return {
-      date_from: from || "",
-      date_to: to || "",
-      query: (searchInput.value || "").trim()
-    };
-  }
-
-  // Currently displayed Table se PO numbers read karta hai
-  function getTableExistingPoNumbers() {
-    const existing = new Set();
-    tableBody.querySelectorAll('tr').forEach(tr => {
-      const poVal = tr.querySelector('input[data-key="poNo"]')?.value;
-      if (poVal && typeof poVal === 'string' && poVal.trim()) {
-        existing.add(poVal.trim().toUpperCase());
-      }
-    });
-    return existing;
-  }
-
-  function updateNumbersAndCount() {
-    const allRows = Array.from(tableBody.querySelectorAll('tr'));
-    
-    if (allRows.length === 0) {
-      tableBox.style.display = 'none';
-      metricsGrid.style.display = 'none';
-      return;
-    }
-
-    tableBox.style.display = 'block';
-    metricsGrid.style.display = 'grid';
-
-    const { date_from, date_to, query } = getActiveFilterBounds();
-    const searchTerm = (query || "").toLowerCase();
-    
-    let fromDate = null;
-    let toDate = null;
-
-    if (date_from) {
-      fromDate = new Date(date_from);
-      fromDate.setHours(0, 0, 0, 0);
-    }
-    if (date_to) {
-      toDate = new Date(date_to);
-      toDate.setHours(23, 59, 59, 999);
-    }
-
-    const poSet = new Set();
-    let totalValue = 0;
-    let visibleCount = 0;
-
-    allRows.forEach(tr => {
-      const poVal = tr.querySelector('input[data-key="poNo"]')?.value || '';
-      const dateVal = tr.querySelector('input[data-key="date"]')?.value || '';
-      const compVal = tr.querySelector('input[data-key="company"]')?.value || '';
-      const partVal = tr.querySelector('input[data-key="partNo"]')?.value || '';
-      const descVal = tr.querySelector('input[data-key="desc"]')?.value || '';
-      const amtVal = parseFloat((tr.querySelector('input[data-key="amount"]')?.value || '0').replace(/,/g, '')) || 0;
-
-      let visible = true;
-
-      if (searchTerm) {
-        const fullRowText = `${poVal} ${compVal} ${partVal} ${descVal}`.toLowerCase();
-        if (!fullRowText.includes(searchTerm)) visible = false;
-      }
-
-      const parsedDate = parseFlexibleDate(dateVal);
-      if (fromDate && parsedDate && parsedDate < fromDate) visible = false;
-      if (toDate && parsedDate && parsedDate > toDate) visible = false;
-
-      if (visible) {
-        tr.style.display = '';
-        visibleCount++;
-        if (poVal.trim()) poSet.add(poVal.trim());
-        totalValue += amtVal;
-
-        const sno = tr.querySelector('.sno-input');
-        if (sno) sno.value = visibleCount;
-      } else {
-        tr.style.display = 'none';
-      }
-    });
-
-    totalPosCount.textContent = poSet.size || (visibleCount > 0 ? 1 : 0);
-    totalItemsCount.textContent = visibleCount;
-    totalValueCount.textContent = totalValue.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    itemCountLabel.textContent = `${visibleCount} of ${allRows.length} record(s) visible`;
-  }
-
-  applySearchBtn.addEventListener('click', updateNumbersAndCount);
-  searchInput.addEventListener('input', updateNumbersAndCount);
-  dateFromFilter.addEventListener('change', updateNumbersAndCount);
-  dateToFilter.addEventListener('change', updateNumbersAndCount);
-  monthFilter.addEventListener('change', updateNumbersAndCount);
-
-  resetFilterBtn.addEventListener('click', () => {
-    searchInput.value = '';
-    monthFilter.value = '';
-    dateFromFilter.value = '';
-    dateToFilter.value = '';
-    updateNumbersAndCount();
-  });
-
-  async function processPdfItems(fileList, apiKey, alreadyProcessedSet = new Set(), forceReprocess = false) {
-    let currentTotal = tableBody.querySelectorAll('tr').length;
-    let newlyExtracted = 0;
-    let skippedCount = 0;
-    let duplicateSkipped = 0;
-    const newPosToRecord = new Set();
-    
-    // Check what is currently showing on screen in the table
-    const displayedPOs = getTableExistingPoNumbers();
-
-    for (let f = 0; f < fileList.length; f++) {
-      const fileObj = fileList[f];
-      const fileName = (fileObj && (fileObj.name || fileObj.filename)) ? (fileObj.name || fileObj.filename) : `Document_${f + 1}.pdf`;
-
-      if (isExplicitlyNonPoFile(fileName)) {
-        skippedCount++;
-        statusText.textContent = `Skipped non-PO file: ${fileName}`;
-        await sleep(150);
-        continue;
-      }
-
-      statusText.textContent = `Analyzing [${f + 1}/${fileList.length}]: ${fileName}...`;
-
-      try {
-        const extractedData = await callGeminiAIWithRetry(apiKey, fileObj.base64);
-
-        if (!extractedData || extractedData.isPurchaseOrder === false) {
-          skippedCount++;
-          statusText.textContent = `Ignored (Not a PO): ${fileName}`;
-          await sleep(150);
-          continue;
+        return {
+            "files": extracted_files,
+            "total_found": len(extracted_files),
+            "previously_processed_pos": saved_pos,
         }
 
-        const extractedPoNo = String(extractedData.poNo || "").trim().toUpperCase();
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading Gmail: {str(e)}")
+    finally:
+        if mail:
+            try:
+                mail.logout()
+            except Exception:
+                pass
 
-        // STRICT CHECK: Agar PO screen ke table par pehle se maujood hai toh dubara add NAHI hoga
-        if (extractedPoNo && displayedPOs.has(extractedPoNo)) {
-          duplicateSkipped++;
-          statusText.textContent = `PO already visible on table: ${extractedPoNo}`;
-          await sleep(200);
-          continue;
-        }
 
-        // Agar forceReprocess unchecked hai aur backend file me processed mark hai
-        if (!forceReprocess && extractedPoNo && alreadyProcessedSet.has(extractedPoNo)) {
-          duplicateSkipped++;
-          statusText.textContent = `Skipping existing processed PO: ${extractedPoNo}`;
-          await sleep(200);
-          continue;
-        }
+@app.get("/", response_class=HTMLResponse)
+def serve_ui():
+    for target in ["index.html", "odd.html"]:
+        if os.path.exists(target):
+            with open(target, "r", encoding="utf-8") as f:
+                return f.read()
+    return "<h1>HTML file not found in current directory!</h1>"
 
-        if (extractedData && Array.isArray(extractedData.items) && extractedData.items.length > 0) {
-          let resolvedCompany = String(extractedData.companyName || "").trim();
-          if (resolvedCompany.toLowerCase().includes("classic automation") || !resolvedCompany) {
-            resolvedCompany = extractedData.buyerCompany || "";
-          }
-          if (!resolvedCompany && extractedData.companyAddress && String(extractedData.companyAddress).toLowerCase().includes("pantnagar")) {
-            resolvedCompany = "SWG INDUSTRIES LIMITED";
-          }
 
-          if (extractedPoNo) {
-            newPosToRecord.add(extractedPoNo);
-            displayedPOs.add(extractedPoNo); // Mark as displayed immediately
-          }
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
 
-          const finalDate = fileObj.email_date || extractedData.date || "";
 
-          extractedData.items.forEach(item => {
-            currentTotal++;
-            newlyExtracted++;
+@app.get("/processed-pos")
+def get_existing_pos():
+    return {"processed": list(get_processed_pos())}
 
-            const finalPartNo = detectAndValidatePartNumber(item.partNo, item.desc);
 
-            addRowToTable({
-              sNo: currentTotal,
-              company: resolvedCompany,
-              address: extractedData.companyAddress || "",
-              poNo: extractedData.poNo || "",
-              date: finalDate,
-              partNo: finalPartNo,
-              desc: item.desc || "",
-              qty: item.qty || "1",
-              unit: item.unit || "NOS",
-              rate: item.rate || "0",
-              discountPercent: item.discountPercent || "0",
-              discountAmount: item.discountAmount || "0",
-              amount: item.amount || "0",
-              source: fileName
-            });
-          });
-        }
-        await sleep(1500); // 1.5s delay to keep quota healthy
-      } catch (docErr) {
-        skippedCount++;
-        statusText.textContent = `Error reading ${fileName}: ${docErr.message}`;
-        await sleep(1000);
-      }
-    }
+@app.post("/clear-history")
+def clear_history():
+    if os.path.exists(PROCESSED_FILE):
+        os.remove(PROCESSED_FILE)
+    return {"status": "cleared"}
 
-    if (newPosToRecord.size > 0 && !forceReprocess) {
-      try {
-        await fetch(`${BACKEND_BASE}/mark-processed`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ po_numbers: Array.from(newPosToRecord) })
-        });
-      } catch (e) {}
-    }
 
-    updateNumbersAndCount();
-    return { newlyExtracted, skippedCount, duplicateSkipped };
-  }
+@app.post("/mark-processed")
+def mark_pos_as_processed(req: MarkProcessedRequest):
+    save_processed_pos(req.po_numbers)
+    return {"status": "success", "total_saved": len(req.po_numbers)}
 
-  fetchGmailBtn.addEventListener('click', async () => {
-    const apiKey = apiKeyInput.value.trim();
-    const emailVal = gmailEmail.value.trim();
-    const passVal = gmailPassword.value.trim();
-    const forceReprocess = forceReprocessCheck.checked;
 
-    if (!apiKey) return alert("Please enter Gemini API Key.");
-    if (!emailVal || !passVal) return alert("Please enter Gmail Address & App Password.");
+@app.post("/fetch-po-pdfs")
+async def fetch_po_pdfs(req: GmailFetchRequest):
+    return await run_in_threadpool(sync_fetch_po_pdfs, req)
 
-    fetchGmailBtn.disabled = true;
-    const filterBounds = getActiveFilterBounds();
 
-    const dateNotice = filterBounds.date_from 
-      ? `${filterBounds.date_from} to ${filterBounds.date_to || filterBounds.date_from}`
-      : "All Dates";
-
-    statusText.textContent = `Searching Gmail for (${filterBounds.query || "all"}) [${dateNotice}]...`;
-
-    try {
-      const payload = { 
-        email: emailVal, 
-        password: passVal, 
-        filter_type: "PO_ONLY",
-        date_from: filterBounds.date_from,
-        date_to: filterBounds.date_to,
-        query: filterBounds.query,
-        force_reprocess: forceReprocess
-      };
-
-      const res = await fetch(`${BACKEND_BASE}/fetch-po-pdfs`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-
-      if (!res.ok) {
-        const errJson = await res.json().catch(() => ({}));
-        throw new Error(errJson.detail || `Server status: ${res.status}`);
-      }
-
-      const data = await res.json();
-      if (!data.files || data.files.length === 0) {
-        statusText.textContent = `No matching PDF attachments found in Gmail.`;
-        return;
-      }
-
-      const alreadyProcessed = new Set((data.previously_processed_pos || []).map(p => String(p).toUpperCase()));
-      const files = data.files.map(f => ({ 
-        name: f.filename, 
-        filename: f.filename, 
-        base64: f.base64, 
-        email_date: f.email_date 
-      }));
-
-      const result = await processPdfItems(files, apiKey, alreadyProcessed, forceReprocess);
-      statusText.textContent = `Completed! Extracted ${result.newlyExtracted} item(s). Skipped ${result.duplicateSkipped} duplicate/existing PO(s).`;
-    } catch (err) {
-      alert("Error: " + err.message);
-      statusText.textContent = "Error: " + err.message;
-    } finally {
-      fetchGmailBtn.disabled = false;
-    }
-  });
-
-  processBtn.addEventListener('click', async () => {
-    const apiKey = apiKeyInput.value.trim();
-    if (!apiKey) return alert("Enter Gemini API key.");
-    if (!pdfInput.files || pdfInput.files.length === 0) return alert("Select files first.");
-
-    processBtn.disabled = true;
-    try {
-      let processedList = [];
-      try {
-        const r = await fetch(`${BACKEND_BASE}/processed-pos`);
-        if (r.ok) {
-          const d = await r.json();
-          processedList = d.processed || [];
-        }
-      } catch (e) {}
-
-      const alreadyProcessed = new Set(processedList.map(p => String(p).toUpperCase()));
-      const fileList = [];
-      for (let file of pdfInput.files) {
-        const base64 = await fileToBase64(file);
-        fileList.push({ name: file.name, filename: file.name, base64: base64, email_date: "" });
-      }
-
-      const result = await processPdfItems(fileList, apiKey, alreadyProcessed, true);
-      statusText.textContent = `Done! Added ${result.newlyExtracted} items.`;
-      pdfInput.value = '';
-    } catch (err) {
-      alert("Error: " + err.message);
-      statusText.textContent = "Error: " + err.message;
-    } finally {
-      processBtn.disabled = false;
-    }
-  });
-
-  function fileToBase64(file) {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = () => resolve(reader.result.split(',')[1]);
-      reader.onerror = reject;
-    });
-  }
-async function callGeminiAIWithRetry(apiKey, base64Pdf) {
-    const prompt = `You are an automated, high-precision Purchase Order (PO) document filter and extractor.
-
-CRITICAL DOCUMENT TYPE VALIDATION:
-- Check if this document is strictly a "PURCHASE ORDER" (or Work Order / Service Order / Purchase Requisition issued by a buyer).
-- If this document is a TAX INVOICE, RETAIL INVOICE, QUOTATION, PROFORMA INVOICE, DELIVERY CHALLAN, STATEMENT, or RECEIPT:
-  Immediately return:
-  {
-    "isPurchaseOrder": false,
-    "documentType": "INVOICE_OR_OTHER",
-    "items": []
-  }
-
-IF AND ONLY IF IT IS A VALID PURCHASE ORDER:
-1. Set "isPurchaseOrder": true.
-2. "companyName": Buyer company issuing the PO. NEVER output vendor.
-3. "partNo" STRICT RULES: Extract ONLY genuine manufacturer Cat No/Part No. NO internal item codes.
-4. "companyAddress": Full buyer address.
-5. "poNo": Purchase Order number.
-6. "date": PO Date (Format: YYYY-MM-DD).
-7. For each item in "items", extract qty, unit, rate, discountPercent, discountAmount, amount.
-
-OUTPUT STRICT JSON ONLY:
-{
-  "isPurchaseOrder": true,
-  "documentType": "PURCHASE_ORDER",
-  "companyName": "BUYER_COMPANY",
-  "buyerCompany": "BUYER_COMPANY",
-  "companyAddress": "BUYER_ADDRESS",
-  "poNo": "PO_NUMBER",
-  "date": "YYYY-MM-DD",
-  "items": [
-    { 
-      "partNo": "", 
-      "desc": "description", 
-      "qty": "1", 
-      "unit": "NOS", 
-      "rate": "0", 
-      "discountPercent": "0", 
-      "discountAmount": "0", 
-      "amount": "0" 
-    }
-  ]
-}`;
-
-    const cleanKey = apiKey.trim();
-    let lastError = null;
-
-    for (let rawModel of FAST_MODELS) {
-      const cleanModel = rawModel.replace(/^models\//, "");
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent?key=${cleanKey}`;
-
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        try {
-          const response = await fetch(url, {
-            method: "POST",
-            headers: { 
-              "Content-Type": "application/json",
-              "x-goog-api-key": cleanKey 
-            },
-            body: JSON.stringify({
-              contents: [{
-                parts: [
-                  { text: prompt },
-                  { inline_data: { mime_type: "application/pdf", data: base64Pdf } }
-                ]
-              }],
-              generationConfig: { 
-                response_mime_type: "application/json", 
-                temperature: 0.0 
-              }
-            })
-          });
-
-          if (response.ok) {
-            const resJson = await response.json();
-            const candidate = resJson.candidates?.[0]?.content?.parts?.[0]?.text;
-            let sanitized = (candidate || "").trim();
-            
-            if (sanitized.startsWith("```json")) sanitized = sanitized.replace(/^```json/, "").replace(/```$/, "").trim();
-            else if (sanitized.startsWith("```")) sanitized = sanitized.replace(/^```/, "").replace(/```$/, "").trim();
-
-            const jsonMatch = sanitized.match(/\{[\s\S]*\}/);
-            if (jsonMatch) sanitized = jsonMatch[0];
-            return JSON.parse(sanitized);
-          }
-
-          const errData = await response.json().catch(() => ({}));
-          const errMsg = errData.error?.message || `HTTP ${response.status}`;
-          
-          if (response.status === 429) {
-            await countdownWait(15, "Rate limit reached");
-            continue;
-          }
-          
-          lastError = errMsg;
-          break; // Fallback to next valid model
-        } catch (netErr) {
-          lastError = netErr.message;
-          await sleep(500);
-        }
-      }
-    }
-    throw new Error(lastError || "Extraction failed.");
-  }
-
-    const cleanKey = apiKey.trim();
-    let lastError = null;
-
-    for (let rawModel of FAST_MODELS) {
-      const cleanModel = rawModel.replace(/^models\//, '');
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent?key=${cleanKey}`;
-
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        try {
-          const response = await fetch(url, {
-            method: "POST",
-            headers: { 
-              "Content-Type": "application/json",
-              "x-goog-api-key": cleanKey 
-            },
-            body: JSON.stringify({
-              contents: [{
-                parts: [
-                  { text: prompt },
-                  { inline_data: { mime_type: "application/pdf", data: base64Pdf } }
-                ]
-              }],
-              generationConfig: { 
-                response_mime_type: "application/json", 
-                temperature: 0.0 
-              }
-            })
-          });
-
-          if (response.ok) {
-            const resJson = await response.json();
-            const candidate = resJson.candidates?.[0]?.content?.parts?.[0]?.text;
-            let sanitized = (candidate || "").trim();
-            
-            if (sanitized.startsWith("```json")) sanitized = sanitized.replace(/^```json/, "").replace(/```$/, "").trim();
-            else if (sanitized.startsWith("```")) sanitized = sanitized.replace(/^```/, "").replace(/```$/, "").trim();
-
-            const jsonMatch = sanitized.match(/\{[\s\S]*\}/);
-            if (jsonMatch) sanitized = jsonMatch[0];
-            return JSON.parse(sanitized);
-          }
-
-          const errData = await response.json().catch(() => ({}));
-          const errMsg = errData.error?.message || `HTTP ${response.status}`;
-          
-          if (response.status === 429) {
-            await countdownWait(15, "Rate limit reached");
-            continue;
-          }
-          
-          lastError = errMsg;
-          break;
-        } catch (netErr) {
-          lastError = netErr.message;
-          await sleep(500);
-        }
-      }
-    }
-    throw new Error(lastError || "Extraction failed.");
-  }
-
-  function addRowToTable(data = {}) {
-    const tr = document.createElement('tr');
-    const thElements = headerRow.querySelectorAll('th');
-
-    thElements.forEach(th => {
-      const td = document.createElement('td');
-      if (th.classList.contains('action-col')) {
-        td.className = 'del';
-        td.title = 'Remove';
-        td.innerHTML = '&times;';
-        td.addEventListener('click', () => {
-          tr.remove();
-          updateNumbersAndCount();
-        });
-      } else {
-        const key = th.getAttribute('data-key');
-        const input = document.createElement('input');
-        input.setAttribute('data-key', key);
-        if (key === 'sNo') input.className = 'sno-input';
-        input.value = (data[key] !== undefined && data[key] !== null) ? data[key] : '';
-        input.addEventListener('input', updateNumbersAndCount);
-        td.appendChild(input);
-      }
-      tr.appendChild(td);
-    });
-    tableBody.appendChild(tr);
-  }
-
-  addRowBtn.addEventListener('click', () => {
-    tableBox.style.display = 'block';
-    addRowToTable({ sNo: tableBody.querySelectorAll('tr').length + 1 });
-    updateNumbersAndCount();
-  });
-
-  clearBtn.addEventListener('click', () => {
-    if (confirm("Clear all rows from table?")) {
-      tableBody.innerHTML = '';
-      updateNumbersAndCount();
-    }
-  });
-
-  addColBtn.addEventListener('click', () => {
-    const colName = prompt("Enter new column name:");
-    if (!colName || !colName.trim()) return;
-
-    const trimmed = colName.trim();
-    const colKey = 'custom_' + Date.now();
-    const actionTh = headerRow.querySelector('.action-col');
-    const newTh = document.createElement('th');
-    newTh.setAttribute('data-key', colKey);
-    newTh.textContent = trimmed;
-    headerRow.insertBefore(newTh, actionTh);
-
-    tableBody.querySelectorAll('tr').forEach(tr => {
-      const actionTd = tr.querySelector('.del');
-      const newTd = document.createElement('td');
-      const input = document.createElement('input');
-      input.setAttribute('data-key', colKey);
-      newTd.appendChild(input);
-      tr.insertBefore(newTd, actionTd);
-    });
-  });
-
-  downloadBtn.addEventListener('click', () => {
-    const headers = [];
-    headerRow.querySelectorAll('th:not(.action-col)').forEach(th => headers.push(th.textContent.trim()));
-
-    const rows = [];
-    tableBody.querySelectorAll('tr').forEach(tr => {
-      if (tr.style.display === 'none') return;
-      const rowData = {};
-      tr.querySelectorAll('td:not(.del) input').forEach((input, i) => {
-        rowData[headers[i] || `Col_${i + 1}`] = input.value;
-      });
-      rows.push(rowData);
-    });
-
-    if (rows.length === 0) return alert("No matching data to download.");
-    const ws = XLSX.utils.json_to_sheet(rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "PO Items");
-    XLSX.writeFile(wb, "Extracted_PO_Data.xlsx");
-  });
-</script>
-</body>
-</html>
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5050))
+    uvicorn.run("server:app", host="0.0.0.0", port=port, reload=False)
