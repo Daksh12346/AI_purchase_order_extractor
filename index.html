@@ -397,7 +397,7 @@
 <div class="container">
   <div class="header-box">
     <h1>AI Purchase Order Extractor</h1>
-    <p class="subtitle">Extracts All Purchase Orders, Work Orders & Procurement Files</p>
+    <p class="subtitle">Extracts Authentic Purchase Orders & Indents (Rejects Invoices / Bills)</p>
 
     <div class="api-key-box">
       <label for="apiKeyInput" style="font-size: 13px; font-weight: 600;">Gemini API Key:</label>
@@ -555,10 +555,9 @@
   const btnLast7 = document.getElementById('btnLast7');
 
   const FAST_MODELS = [
-    "gemini-3.5-flash-lite",
-    "gemini-3.8-flash",
-    "gemini-3.5-flash",
-    "gemini-2.5-flash"
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash"
   ];
 
   const BACKEND_BASE = window.location.origin;
@@ -629,8 +628,8 @@
   function isExplicitlyNonPoFile(filename) {
     if (!filename || typeof filename !== 'string') return false;
     const lower = filename.toLowerCase();
-    const blockedTerms = ['tax invoice', 'retail invoice', 'delivery challan', 'salary slip', 'receipt_'];
-    const poTerms = ['purchase', 'order', 'po', 'indent', 'quotation', 'rfq', 'so'];
+    const blockedTerms = ['tax invoice', 'retail invoice', 'tax_invoice', 'invoice', 'delivery challan', 'salary slip', 'receipt_'];
+    const poTerms = ['purchase', 'order', 'po', 'indent'];
     if (poTerms.some(t => lower.includes(t))) return false;
     return blockedTerms.some(t => lower.includes(t));
   }
@@ -799,7 +798,6 @@
     let newlyExtracted = 0;
     let skippedCount = 0;
     let duplicateSkipped = 0;
-    const newPosToRecord = new Set();
     const displayedPOs = getTableExistingPoNumbers();
 
     for (let f = 0; f < fileList.length; f++) {
@@ -820,7 +818,7 @@
 
         if (!extractedData || extractedData.isPurchaseOrder === false) {
           skippedCount++;
-          statusText.textContent = `Ignored (Not an Order): ${fileName}`;
+          statusText.textContent = `Rejected (Bill / Non-PO): ${fileName}`;
           await sleep(50);
           continue;
         }
@@ -843,21 +841,15 @@
 
         if (extractedData && Array.isArray(extractedData.items) && extractedData.items.length > 0) {
           let resolvedCompany = String(extractedData.companyName || "").trim();
-          if (resolvedCompany.toLowerCase().includes("classic automation") || !resolvedCompany) {
-            resolvedCompany = extractedData.buyerCompany || "";
-          }
-          if (!resolvedCompany && extractedData.companyAddress && String(extractedData.companyAddress).toLowerCase().includes("pantnagar")) {
-            resolvedCompany = "SWG INDUSTRIES LIMITED";
-          }
+          let resolvedAddress = String(extractedData.companyAddress || "").trim();
 
           if (extractedPoNo) {
-            newPosToRecord.add(extractedPoNo);
             displayedPOs.add(extractedPoNo);
           }
 
           const finalDate = fileObj.email_date || extractedData.date || "";
 
-          // TURANT DISPLAY: Har line item nikalte hi table me inject ho jayega
+          // Instant Live Append: Har line item nikalte hi UI table me inject hota hai
           extractedData.items.forEach(item => {
             const currentTotal = tableBody.querySelectorAll('tr').length + 1;
             newlyExtracted++;
@@ -866,9 +858,9 @@
 
             addRowToTable({
               sNo: currentTotal,
-              company: resolvedCompany,
-              address: extractedData.companyAddress || "",
-              poNo: extractedData.poNo || "",
+              company: resolvedCompany || "Not Specified",
+              address: resolvedAddress || "Not Specified",
+              poNo: extractedData.poNo || "N/A",
               date: finalDate,
               partNo: finalPartNo,
               desc: item.desc || "",
@@ -882,10 +874,8 @@
             });
           });
 
-          // Table aur Metrics card live update turant ho jayenge
           updateNumbersAndCount();
 
-          // Turant backend par record mark kar do taaki reload me save rahe
           if (extractedPoNo && !forceReprocess) {
             fetch(`${BACKEND_BASE}/mark-processed`, {
               method: "POST",
@@ -1010,51 +1000,54 @@
       reader.onerror = reject;
     });
   }
-async function callGeminiAIWithRetry(apiKey, base64Pdf) {
+
+  async function callGeminiAIWithRetry(apiKey, base64Pdf) {
     const cleanKey = apiKey.trim();
     let lastError = null;
 
-    // Structured JSON Schema enforce kar rahe hain taaki koi bhi field galat ya miss na ho
+    const systemInstruction = `You are a zero-tolerance industrial procurement auditor.
+Carefully review the PDF document page-by-page.
+
+RULE 1: STRICT INVOICE & BILL REJECTION
+- If the document contains any of the following titles or indicators:
+  "TAX INVOICE", "INVOICE", "COMMERCIAL INVOICE", "PROFORMA INVOICE", "RETAIL INVOICE",
+  "DELIVERY CHALLAN", "E-WAY BILL", "IRN NO", "BILL OF SUPPLY", "PAYMENT VOUCHER"
+  -> THIS IS A BILL/INVOICE, NOT A PURCHASE ORDER!
+  -> Even if it contains "Buyer PO Ref" or "PO No.", return isPurchaseOrder: false immediately.
+
+RULE 2: STRICT BUYER VS VENDOR EXTRACTION
+- On a Purchase Order, there are TWO parties:
+  1. BUYER (The client/customer company issuing the order and paying). Look under top letterhead, "Bill To:", "Buyer:", "Invoice To:", "Purchaser:".
+  2. VENDOR/SELLER (The supplier supplying the parts).
+- Under buyerCompanyName, output ONLY the BUYER organization. NEVER output the vendor/supplier name (e.g., do NOT output Classic Automation as buyerCompanyName).
+- Under buyerBillingAddress, output the registered or billing address of that BUYER company.
+
+RULE 3: PO NUMBER EXTRACTION
+- Extract the PO Number / Order Number / Indent Number written next to labels like "P.O. No.", "Order Ref:", "PO #", "SAP PO:".
+- Do NOT confuse GSTIN (15 characters) or Vendor Code with PO Number.`;
+
     const jsonSchema = {
       type: "OBJECT",
       properties: {
-        documentType: { 
-          type: "STRING", 
-          description: "PURCHASE_ORDER, WORK_ORDER, INDENT, INVOICE, or OTHER" 
-        },
-        isPurchaseOrder: { 
-          type: "BOOLEAN", 
-          description: "Strictly true ONLY for Purchase Orders / Work Orders / Indents. Strictly false for Tax Invoices, Delivery Challans, Receipts." 
-        },
-        buyerCompanyName: { 
-          type: "STRING", 
-          description: "Name of the BUYER/CUSTOMER entity issuing the order (under Bill To / Ordered By / Header). NEVER the vendor/seller receiving payment." 
-        },
-        buyerBillingAddress: { 
-          type: "STRING", 
-          description: "Full registered or billing address of the Buyer." 
-        },
-        poNumber: { 
-          type: "STRING", 
-          description: "Exact Purchase Order No / PO Ref / Work Order No. Never output GSTIN or Vendor Code." 
-        },
-        poDate: { 
-          type: "STRING", 
-          description: "PO Date in YYYY-MM-DD format." 
-        },
+        isPurchaseOrder: { type: "BOOLEAN" },
+        documentType: { type: "STRING" },
+        buyerCompanyName: { type: "STRING" },
+        buyerBillingAddress: { type: "STRING" },
+        poNumber: { type: "STRING" },
+        poDate: { type: "STRING" },
         items: {
           type: "ARRAY",
           items: {
             type: "OBJECT",
             properties: {
-              partNo: { type: "STRING", description: "Manufacturer part number or catalogue code. Empty if none." },
-              desc: { type: "STRING", description: "Detailed item description." },
-              qty: { type: "STRING", description: "Numeric quantity ordered." },
-              unit: { type: "STRING", description: "Unit like NOS, SET, MTR, KG." },
-              rate: { type: "STRING", description: "Unit price / rate." },
-              discountPercent: { type: "STRING", description: "Discount percentage or 0." },
-              discountAmount: { type: "STRING", description: "Discount amount or 0." },
-              amount: { type: "STRING", description: "Total item amount." }
+              partNo: { type: "STRING" },
+              desc: { type: "STRING" },
+              qty: { type: "STRING" },
+              unit: { type: "STRING" },
+              rate: { type: "STRING" },
+              discountPercent: { type: "STRING" },
+              discountAmount: { type: "STRING" },
+              amount: { type: "STRING" }
             },
             required: ["desc", "qty", "rate", "amount"]
           }
@@ -1062,27 +1055,6 @@ async function callGeminiAIWithRetry(apiKey, base64Pdf) {
       },
       required: ["isPurchaseOrder", "buyerCompanyName", "poNumber", "items"]
     };
-
-    const systemInstruction = `You are a forensic document auditor specialized in industrial procurement.
-Your task is to parse documents and extract purchase order information with zero tolerance for entity confusion.
-
-CRITICAL EXTRACTION LOGIC:
-1. DOCUMENT CLASSIFICATION:
-   - If the main heading says "TAX INVOICE", "COMMERCIAL INVOICE", "DELIVERY CHALLAN", or "RECEIPT", set isPurchaseOrder to FALSE immediately. Even if it references a previous PO number, an invoice is NOT a purchase order.
-   - If the heading is "PURCHASE ORDER", "PO", "WORK ORDER", "SERVICE ORDER", or "INDENT", set isPurchaseOrder to TRUE.
-
-2. BUYER vs VENDOR SEPARATION:
-   - Identify the TWO parties in the transaction:
-     * SELLER/VENDOR: The company fulfilling the order (e.g. suppliers, contractors). DO NOT put this in buyerCompanyName.
-     * BUYER/CUSTOMER: The organization issuing the PO and paying money. Look for "Bill To:", "Invoice To:", "Purchaser:", "Customer:", or the top letterhead issuer. Put THIS company in buyerCompanyName.
-   - Put the Buyer's billing/registered address in buyerBillingAddress.
-
-3. PO NUMBER DETECTION:
-   - Look strictly under labels like: "P.O. No.", "PO Number:", "Order No.:", "Indent No.:", "SAP PO:".
-   - Do NOT pick up GSTIN (15 digits alphanumeric), PAN (10 digits), or internal Vendor Codes.
-
-4. ITEMS TABLE:
-   - Extract all items with line-level accuracy. Ensure quantities and rates correspond to the item line.`;
 
     for (let rawModel of FAST_MODELS) {
       const cleanModel = rawModel.replace(/^models\//, "");
@@ -1119,13 +1091,12 @@ CRITICAL EXTRACTION LOGIC:
             const candidate = resJson.candidates?.[0]?.content?.parts?.[0]?.text;
             let data = JSON.parse(candidate || "{}");
 
-            // Normalize schema properties to match UI expectations
             return {
-              isPurchaseOrder: data.isPurchaseOrder ?? false,
-              companyName: data.buyerCompanyName || "",
-              companyAddress: data.buyerBillingAddress || "",
-              poNo: data.poNumber || "",
-              date: data.poDate || "",
+              isPurchaseOrder: data.isPurchaseOrder === true,
+              companyName: (data.buyerCompanyName || "").trim(),
+              companyAddress: (data.buyerBillingAddress || "").trim(),
+              poNo: (data.poNumber || "").trim(),
+              date: (data.poDate || "").trim(),
               items: (data.items || []).map(it => ({
                 partNo: it.partNo || "",
                 desc: it.desc || "",
@@ -1157,6 +1128,7 @@ CRITICAL EXTRACTION LOGIC:
     }
     throw new Error(lastError || "Extraction failed.");
   }
+
   function addRowToTable(data = {}) {
     const tr = document.createElement('tr');
     const thElements = headerRow.querySelectorAll('th');
