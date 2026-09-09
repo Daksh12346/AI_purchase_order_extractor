@@ -17,23 +17,18 @@ import uvicorn
 
 app = FastAPI(title="AI Purchase Order Extractor System")
 
-# -------------------------------------------------------------
-# CORS Middleware Configuration
-# allow_origin_regex use karne se multi-laptop / network calls
-# credentials ke saath fail nahi hoti hain.
-# -------------------------------------------------------------
+# CORS Configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=".*",
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],
 )
 
 PROCESSED_FILE = "processed_po.json"
-MAX_FETCH_EMAILS = 10  # Browser timeout avoid karne ke liye
-MAX_FILE_SIZE_MB = 15  # Large JSON payload block karne ke liye
+MAX_FETCH_EMAILS = 10
+MAX_FILE_SIZE_MB = 15
 
 
 def get_processed_pos() -> Set[str]:
@@ -196,22 +191,18 @@ def sync_fetch_po_pdfs(req: GmailFetchRequest) -> dict:
             pass
 
 
-# -------------------------------------------------------------
-# Endpoints
-# -------------------------------------------------------------
-
 @app.get("/", response_class=HTMLResponse)
 def serve_ui():
-    if os.path.exists("index.html"):
-        with open("index.html", "r", encoding="utf-8") as f:
-            return f.read()
-    return "<h1>index.html not found in current directory!</h1>"
+    for target in ["index.html", "odd.html"]:
+        if os.path.exists(target):
+            with open(target, "r", encoding="utf-8") as f:
+                return f.read()
+    return "<h1>HTML file not found in current directory!</h1>"
 
 
 @app.get("/health")
 def health_check():
-    """Dusre laptop se connectivity check karne ke liye"""
-    return {"status": "ok", "host_ip": "192.168.101.68"}
+    return {"status": "ok"}
 
 
 @app.get("/processed-pos")
@@ -238,5 +229,5 @@ async def fetch_po_pdfs(req: GmailFetchRequest):
 
 
 if __name__ == "__main__":
-    # Host 0.0.0.0 par listen karega taaki network ke baki devices connect kar sakein
-    uvicorn.run(app, host="0.0.0.0", port=5050)
+    port = int(os.environ.get("PORT", 5050))
+    uvicorn.run("server:app", host="0.0.0.0", port=port, reload=False)
