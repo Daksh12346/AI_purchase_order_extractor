@@ -2,3 +2,6 @@ flask
 gunicorn
 fastapi
 uvicorn[standard]
+fastapi
+uvicorn[standard]
+pydantic
