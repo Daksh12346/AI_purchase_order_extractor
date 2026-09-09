@@ -554,13 +554,12 @@
   const btnYesterday = document.getElementById('btnYesterday');
   const btnLast7 = document.getElementById('btnLast7');
 
-  // Fastest official Flash endpoints with smart fallbacks
   const FAST_MODELS = [
-    "gemini-3.8-flash",
-    "gemini-3.5-flash",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite"
   ];
 
-  // Dynamically uses Render host or local host depending on current domain
   const BACKEND_BASE = window.location.origin;
 
   if (localStorage.getItem('gemini_api_key')) apiKeyInput.value = localStorage.getItem('gemini_api_key');
@@ -701,6 +700,7 @@
     };
   }
 
+  // Currently displayed Table se PO numbers read karta hai
   function getTableExistingPoNumbers() {
     const existing = new Set();
     tableBody.querySelectorAll('tr').forEach(tr => {
@@ -801,7 +801,9 @@
     let skippedCount = 0;
     let duplicateSkipped = 0;
     const newPosToRecord = new Set();
-    const tableExistingPOs = getTableExistingPoNumbers();
+    
+    // Check what is currently showing on screen in the table
+    const displayedPOs = getTableExistingPoNumbers();
 
     for (let f = 0; f < fileList.length; f++) {
       const fileObj = fileList[f];
@@ -828,10 +830,19 @@
 
         const extractedPoNo = String(extractedData.poNo || "").trim().toUpperCase();
 
-        if (!forceReprocess && extractedPoNo && (alreadyProcessedSet.has(extractedPoNo) || tableExistingPOs.has(extractedPoNo))) {
+        // STRICT CHECK: Agar PO screen ke table par pehle se maujood hai toh dubara add NAHI hoga
+        if (extractedPoNo && displayedPOs.has(extractedPoNo)) {
           duplicateSkipped++;
-          statusText.textContent = `Skipping existing PO: ${extractedPoNo}`;
-          await sleep(150);
+          statusText.textContent = `PO already visible on table: ${extractedPoNo}`;
+          await sleep(200);
+          continue;
+        }
+
+        // Agar forceReprocess unchecked hai aur backend file me processed mark hai
+        if (!forceReprocess && extractedPoNo && alreadyProcessedSet.has(extractedPoNo)) {
+          duplicateSkipped++;
+          statusText.textContent = `Skipping existing processed PO: ${extractedPoNo}`;
+          await sleep(200);
           continue;
         }
 
@@ -846,7 +857,7 @@
 
           if (extractedPoNo) {
             newPosToRecord.add(extractedPoNo);
-            tableExistingPOs.add(extractedPoNo);
+            displayedPOs.add(extractedPoNo); // Mark as displayed immediately
           }
 
           const finalDate = fileObj.email_date || extractedData.date || "";
@@ -875,6 +886,7 @@
             });
           });
         }
+        await sleep(1500); // 1.5s delay to keep quota healthy
       } catch (docErr) {
         skippedCount++;
         statusText.textContent = `Error reading ${fileName}: ${docErr.message}`;
@@ -912,7 +924,7 @@
       ? `${filterBounds.date_from} to ${filterBounds.date_to || filterBounds.date_from}`
       : "All Dates";
 
-    statusText.textContent = `Connecting to Gmail (${dateNotice})...`;
+    statusText.textContent = `Searching Gmail for (${filterBounds.query || "all"}) [${dateNotice}]...`;
 
     try {
       const payload = { 
@@ -938,7 +950,7 @@
 
       const data = await res.json();
       if (!data.files || data.files.length === 0) {
-        statusText.textContent = `No PO PDF attachments found in Gmail for (${dateNotice}).`;
+        statusText.textContent = `No matching PDF attachments found in Gmail.`;
         return;
       }
 
@@ -951,7 +963,7 @@
       }));
 
       const result = await processPdfItems(files, apiKey, alreadyProcessed, forceReprocess);
-      statusText.textContent = `Completed! Extracted ${result.newlyExtracted} item(s). Skipped ${result.duplicateSkipped} existing PO(s).`;
+      statusText.textContent = `Completed! Extracted ${result.newlyExtracted} item(s). Skipped ${result.duplicateSkipped} duplicate/existing PO(s).`;
     } catch (err) {
       alert("Error: " + err.message);
       statusText.textContent = "Error: " + err.message;
@@ -1048,14 +1060,21 @@ OUTPUT STRICT JSON ONLY:
   ]
 }`;
 
+    const cleanKey = apiKey.trim();
     let lastError = null;
-    for (const model of FAST_MODELS) {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+    for (let rawModel of FAST_MODELS) {
+      const cleanModel = rawModel.replace(/^models\//, '');
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent?key=${cleanKey}`;
+
       for (let attempt = 1; attempt <= 2; attempt++) {
         try {
           const response = await fetch(url, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { 
+              "Content-Type": "application/json",
+              "x-goog-api-key": cleanKey 
+            },
             body: JSON.stringify({
               contents: [{
                 parts: [
@@ -1063,7 +1082,10 @@ OUTPUT STRICT JSON ONLY:
                   { inline_data: { mime_type: "application/pdf", data: base64Pdf } }
                 ]
               }],
-              generationConfig: { response_mime_type: "application/json", temperature: 0.0 }
+              generationConfig: { 
+                response_mime_type: "application/json", 
+                temperature: 0.0 
+              }
             })
           });
 
@@ -1084,12 +1106,12 @@ OUTPUT STRICT JSON ONLY:
           const errMsg = errData.error?.message || `HTTP ${response.status}`;
           
           if (response.status === 429) {
-            await countdownWait(5, "Rate limit reached");
+            await countdownWait(15, "Rate limit reached");
             continue;
           }
           
           lastError = errMsg;
-          break; // Fallback to next model in FAST_MODELS list
+          break;
         } catch (netErr) {
           lastError = netErr.message;
           await sleep(500);
