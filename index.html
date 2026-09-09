@@ -555,23 +555,12 @@
   const btnLast7 = document.getElementById('btnLast7');
 
   const FAST_MODELS = [
-    "gemini-3.6-flash"
+    "gemini-2.5-flash",
+    "gemini-1.5-flash"
   ];
-  // Check karo ki localhost aur 127.0.0.1 ke alawa koi aur local port toh use nahi ho raha
-const IS_LOCAL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 
-// Change this:
-const BACKEND_BASE = 'http://127.0.0.1:5050';
-
-// To this (an empty string so it automatically calls the Render backend URL):
-const BACKEND_BASE = '';
-  function ensureBackendConfigured() {
-    if (!IS_LOCAL && BACKEND_BASE.includes('YOUR-BACKEND-NAME')) {
-      alert("Please update PRODUCTION_BACKEND_URL in index.html with your active backend URL.");
-      return false;
-    }
-    return true;
-  }
+  // Dynamically uses Render host or local host depending on where it's opened
+  const BACKEND_BASE = window.location.origin;
 
   if (localStorage.getItem('gemini_api_key')) apiKeyInput.value = localStorage.getItem('gemini_api_key');
   if (localStorage.getItem('gmail_email')) gmailEmail.value = localStorage.getItem('gmail_email');
@@ -617,7 +606,6 @@ const BACKEND_BASE = '';
   });
 
   clearHistoryBtn.addEventListener('click', async () => {
-    if (!ensureBackendConfigured()) return;
     if (confirm("Reset backend PO memory? Skipped POs will be allowed to extract again.")) {
       try {
         await fetch(`${BACKEND_BASE}/clear-history`, { method: "POST" });
@@ -908,8 +896,6 @@ const BACKEND_BASE = '';
   }
 
   fetchGmailBtn.addEventListener('click', async () => {
-    if (!ensureBackendConfigured()) return;
-
     const apiKey = apiKeyInput.value.trim();
     const emailVal = gmailEmail.value.trim();
     const passVal = gmailPassword.value.trim();
@@ -1085,7 +1071,6 @@ OUTPUT STRICT JSON ONLY:
             const candidate = resJson.candidates?.[0]?.content?.parts?.[0]?.text;
             let sanitized = (candidate || "").trim();
             
-            // Unquote code fences if returned
             if (sanitized.startsWith("```json")) sanitized = sanitized.replace(/^```json/, "").replace(/```$/, "").trim();
             else if (sanitized.startsWith("```")) sanitized = sanitized.replace(/^```/, "").replace(/```$/, "").trim();
 
