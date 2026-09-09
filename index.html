@@ -554,12 +554,14 @@
   const btnYesterday = document.getElementById('btnYesterday');
   const btnLast7 = document.getElementById('btnLast7');
 
+  // Fastest official Flash endpoints with smart fallbacks
   const FAST_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-1.5-flash"
+    "gemini-3.8-flash",
+    "gemini-3.5-flash",
+    "gemini-2.5-flash"
   ];
 
-  // Dynamically uses Render host or local host depending on where it's opened
+  // Dynamically uses Render host or local host depending on current domain
   const BACKEND_BASE = window.location.origin;
 
   if (localStorage.getItem('gemini_api_key')) apiKeyInput.value = localStorage.getItem('gemini_api_key');
@@ -1081,12 +1083,14 @@ OUTPUT STRICT JSON ONLY:
 
           const errData = await response.json().catch(() => ({}));
           const errMsg = errData.error?.message || `HTTP ${response.status}`;
+          
           if (response.status === 429) {
             await countdownWait(5, "Rate limit reached");
             continue;
           }
+          
           lastError = errMsg;
-          break;
+          break; // Fallback to next model in FAST_MODELS list
         } catch (netErr) {
           lastError = netErr.message;
           await sleep(500);
