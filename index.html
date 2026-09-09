@@ -554,12 +554,12 @@
   const btnYesterday = document.getElementById('btnYesterday');
   const btnLast7 = document.getElementById('btnLast7');
 
+  // Latest verified active models as recommended by Google API
   const FAST_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite"
+    "gemini-3.5-flash-lite",
+    "gemini-3.8-flash",
+    "gemini-3.5-flash"
   ];
-
   const BACKEND_BASE = window.location.origin;
 
   if (localStorage.getItem('gemini_api_key')) apiKeyInput.value = localStorage.getItem('gemini_api_key');
@@ -1014,8 +1014,7 @@
       reader.onerror = reject;
     });
   }
-
-  async function callGeminiAIWithRetry(apiKey, base64Pdf) {
+async function callGeminiAIWithRetry(apiKey, base64Pdf) {
     const prompt = `You are an automated, high-precision Purchase Order (PO) document filter and extractor.
 
 CRITICAL DOCUMENT TYPE VALIDATION:
@@ -1059,6 +1058,67 @@ OUTPUT STRICT JSON ONLY:
     }
   ]
 }`;
+
+    const cleanKey = apiKey.trim();
+    let lastError = null;
+
+    for (let rawModel of FAST_MODELS) {
+      const cleanModel = rawModel.replace(/^models\//, "");
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent?key=${cleanKey}`;
+
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const response = await fetch(url, {
+            method: "POST",
+            headers: { 
+              "Content-Type": "application/json",
+              "x-goog-api-key": cleanKey 
+            },
+            body: JSON.stringify({
+              contents: [{
+                parts: [
+                  { text: prompt },
+                  { inline_data: { mime_type: "application/pdf", data: base64Pdf } }
+                ]
+              }],
+              generationConfig: { 
+                response_mime_type: "application/json", 
+                temperature: 0.0 
+              }
+            })
+          });
+
+          if (response.ok) {
+            const resJson = await response.json();
+            const candidate = resJson.candidates?.[0]?.content?.parts?.[0]?.text;
+            let sanitized = (candidate || "").trim();
+            
+            if (sanitized.startsWith("```json")) sanitized = sanitized.replace(/^```json/, "").replace(/```$/, "").trim();
+            else if (sanitized.startsWith("```")) sanitized = sanitized.replace(/^```/, "").replace(/```$/, "").trim();
+
+            const jsonMatch = sanitized.match(/\{[\s\S]*\}/);
+            if (jsonMatch) sanitized = jsonMatch[0];
+            return JSON.parse(sanitized);
+          }
+
+          const errData = await response.json().catch(() => ({}));
+          const errMsg = errData.error?.message || `HTTP ${response.status}`;
+          
+          if (response.status === 429) {
+            await countdownWait(15, "Rate limit reached");
+            continue;
+          }
+          
+          lastError = errMsg;
+          break; // Fallback to next valid model
+        } catch (netErr) {
+          lastError = netErr.message;
+          await sleep(500);
+        }
+      }
+    }
+    throw new Error(lastError || "Extraction failed.");
+  }
 
     const cleanKey = apiKey.trim();
     let lastError = null;
