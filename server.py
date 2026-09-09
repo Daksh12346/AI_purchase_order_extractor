@@ -17,7 +17,7 @@ import uvicorn
 
 app = FastAPI(title="AI Purchase Order Extractor System")
 
-# Clean CORS setup
+# CORS setup
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,8 +27,9 @@ app.add_middleware(
 )
 
 PROCESSED_FILE = "processed_po.json"
-MAX_FETCH_EMAILS = 15
-MAX_FILE_SIZE_MB = 15
+# Limit set to 1000000000 as requested
+MAX_FETCH_EMAILS = 1000000000
+MAX_FILE_SIZE_MB = 25
 
 
 def get_processed_pos() -> Set[str]:
@@ -45,8 +46,8 @@ def get_processed_pos() -> Set[str]:
 def save_processed_pos(new_pos: List[str]):
     existing = get_processed_pos()
     for po in new_pos:
-        if po and po.strip():
-            existing.add(po.strip().upper())
+        if po and str(po).strip():
+            existing.add(str(po).strip().upper())
     with open(PROCESSED_FILE, "w", encoding="utf-8") as f:
         json.dump({"po_numbers": list(existing)}, f, indent=2)
 
@@ -113,19 +114,18 @@ def sync_fetch_po_pdfs(req: GmailFetchRequest) -> dict:
             except ValueError:
                 pass
 
-        # Robust sanitation for spaces/hyphens in PO number & Company names
         if req.query and req.query.strip():
             raw_q = req.query.strip().replace('"', '').replace("'", "")
             gmail_query_parts.append(f'({raw_q})')
 
         full_raw_query = " ".join(gmail_query_parts)
-        
         status, message_numbers = mail.uid("search", None, 'X-GM-RAW', f'"{full_raw_query}"')
 
         if status != "OK" or not message_numbers[0]:
             return {"files": [], "message": "No emails found matching criteria."}
 
         email_uids = message_numbers[0].split()
+        # Takes all matching emails up to MAX_FETCH_EMAILS
         recent_uids = email_uids[-MAX_FETCH_EMAILS:]
         recent_uids.reverse()
 
