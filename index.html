@@ -1012,44 +1012,80 @@
   }
 
   async function callGeminiAIWithRetry(apiKey, base64Pdf) {
-    const prompt = `You are an expert purchase order and procurement data extractor.
-Analyze this document thoroughly.
+    const prompt = `You are a high-precision enterprise Purchase Order (PO) extraction specialist.
+Carefully read and analyze the provided PDF document page-by-page.
 
-EXTRACTION SCOPE:
-- Check if this document represents an ORDER, PURCHASE ORDER, WORK ORDER, SERVICE ORDER, INDENT, PROCUREMENT ORDER, or CONTRACT.
-- If it is purely a TAX INVOICE, PAYMENT RECEIPT, or DELIVERY CHALLAN without any order info, return:
-  {
-    "isPurchaseOrder": false,
-    "items": []
-  }
+════════════════════════════════════════════════════════════════════
+RULE 1: STRICT DOCUMENT TYPE VERIFICATION
+════════════════════════════════════════════════════════════════════
+Look at the primary title/header of the document:
+- IF THE DOCUMENT TITLE IS:
+  "TAX INVOICE", "COMMERCIAL INVOICE", "PROFORMA INVOICE", "BILL OF SUPPLY", 
+  "DELIVERY CHALLAN", "GOODS RECEIPT SLIP", "PAYMENT VOUCHER", OR "STATEMENT":
+  -> This is NOT a Purchase Order! Even if it mentions a "PO No." as reference.
+  -> Return immediately:
+     {
+       "isPurchaseOrder": false,
+       "companyName": "",
+       "companyAddress": "",
+       "poNo": "",
+       "date": "",
+       "items": []
+     }
 
-EXTRACTION INSTRUCTIONS:
-1. "isPurchaseOrder": true if it contains items/services being ordered or purchased.
-2. "companyName": The Buyer/Customer/Client company issuing or placing the order.
-3. "companyAddress": The buyer or site address.
-4. "poNo": The PO Number, Order Number, or Reference ID.
-5. "date": Date of the order (Format: YYYY-MM-DD).
-6. "items": List EVERY line item/product/service in the document table with:
-   - "partNo": Manufacturer catalogue/part/item code if present, otherwise empty.
-   - "desc": Item description/name.
-   - "qty": Quantity (e.g. "10", "1").
-   - "unit": Unit of measurement (e.g. "NOS", "SET", "MTR").
-   - "rate": Unit price/rate.
-   - "discountPercent": Percentage discount if mentioned (default "0").
-   - "discountAmount": Discount amount if mentioned (default "0").
-   - "amount": Total amount for that line item.
+- IF THE DOCUMENT IS:
+  "PURCHASE ORDER", "PO", "WORK ORDER", "SERVICE ORDER", "INDENT", 
+  "PURCHASE REQUISITION", "LETTER OF INTENT (LOI)", OR "CONTRACT ORDER":
+  -> Mark "isPurchaseOrder": true and proceed to extract.
 
-OUTPUT ONLY CLEAN VALID JSON:
+════════════════════════════════════════════════════════════════════
+RULE 2: BUYER COMPANY NAME & ADDRESS (CRITICAL)
+════════════════════════════════════════════════════════════════════
+A Purchase Order has TWO entities:
+1. BUYER (The client/customer who is placing the order and paying).
+2. VENDOR/SUPPLIER (The seller receiving the order).
+
+- ALWAYS extract the BUYER details under "companyName" and "companyAddress".
+- DO NOT extract the Vendor/Supplier's name (e.g., if "Classic Automation" is the vendor/seller, DO NOT output them as companyName).
+- How to locate the Buyer:
+  a) Look at the top company header/logo (the entity issuing the document).
+  b) Look under "Bill To", "Buyer", "Invoice To", "Purchaser", or "Client".
+- "companyAddress": Full registered or billing address of the Buyer company.
+
+════════════════════════════════════════════════════════════════════
+RULE 3: PO NUMBER EXTRACTION
+════════════════════════════════════════════════════════════════════
+Search thoroughly for:
+- "P.O. Number", "PO No.", "Purchase Order No.", "Order No.", "Ref No.", "SAP PO", "WO No."
+- If only numbers are present after these labels (e.g., 4510066200, 0630032011), capture that full identifier.
+- Do NOT confuse GSTIN, PAN, or Vendor Code with PO Number.
+
+════════════════════════════════════════════════════════════════════
+RULE 4: LINE ITEMS EXTRACTION
+════════════════════════════════════════════════════════════════════
+Extract all items listed in the table:
+- "partNo": Look for "Part No", "Cat No", "Model No", "Material Code", "Item Code". If none, leave empty string "".
+- "desc": Item or service description.
+- "qty": Quantity ordered (clean numeric string).
+- "unit": Unit of measure ("NOS", "SET", "MTR", "KG", "EA", etc.).
+- "rate": Unit price/rate.
+- "discountPercent": Explicit discount percentage if written, else "0".
+- "discountAmount": Explicit discount value if written, else "0".
+- "amount": Line total (Rate * Qty - Discount).
+
+════════════════════════════════════════════════════════════════════
+OUTPUT STRICT JSON ONLY (NO MARKDOWN CODE BLOCKS, NO EXTRA TEXT):
+════════════════════════════════════════════════════════════════════
 {
   "isPurchaseOrder": true,
-  "companyName": "BUYER_NAME",
-  "companyAddress": "ADDRESS",
-  "poNo": "PO_NUMBER",
+  "companyName": "BUYER_COMPANY_NAME",
+  "companyAddress": "BUYER_FULL_ADDRESS",
+  "poNo": "EXTRACTED_PO_NUMBER",
   "date": "YYYY-MM-DD",
   "items": [
     {
       "partNo": "",
-      "desc": "Item Name",
+      "desc": "Item Description",
       "qty": "1",
       "unit": "NOS",
       "rate": "0",
@@ -1120,7 +1156,6 @@ OUTPUT ONLY CLEAN VALID JSON:
     }
     throw new Error(lastError || "Extraction failed.");
   }
-
   function addRowToTable(data = {}) {
     const tr = document.createElement('tr');
     const thElements = headerRow.querySelectorAll('th');
