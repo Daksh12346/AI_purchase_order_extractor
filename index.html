@@ -560,8 +560,11 @@
   // Check karo ki localhost aur 127.0.0.1 ke alawa koi aur local port toh use nahi ho raha
 const IS_LOCAL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 
-// Force local backend during local testing:
+// Change this:
 const BACKEND_BASE = 'http://127.0.0.1:5050';
+
+// To this (an empty string so it automatically calls the Render backend URL):
+const BACKEND_BASE = '';
   function ensureBackendConfigured() {
     if (!IS_LOCAL && BACKEND_BASE.includes('YOUR-BACKEND-NAME')) {
       alert("Please update PRODUCTION_BACKEND_URL in index.html with your active backend URL.");
