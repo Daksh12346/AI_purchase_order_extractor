@@ -1010,94 +1010,79 @@
       reader.onerror = reject;
     });
   }
-
-  async function callGeminiAIWithRetry(apiKey, base64Pdf) {
-    const prompt = `You are a high-precision enterprise Purchase Order (PO) extraction specialist.
-Carefully read and analyze the provided PDF document page-by-page.
-
-════════════════════════════════════════════════════════════════════
-RULE 1: STRICT DOCUMENT TYPE VERIFICATION
-════════════════════════════════════════════════════════════════════
-Look at the primary title/header of the document:
-- IF THE DOCUMENT TITLE IS:
-  "TAX INVOICE", "COMMERCIAL INVOICE", "PROFORMA INVOICE", "BILL OF SUPPLY", 
-  "DELIVERY CHALLAN", "GOODS RECEIPT SLIP", "PAYMENT VOUCHER", OR "STATEMENT":
-  -> This is NOT a Purchase Order! Even if it mentions a "PO No." as reference.
-  -> Return immediately:
-     {
-       "isPurchaseOrder": false,
-       "companyName": "",
-       "companyAddress": "",
-       "poNo": "",
-       "date": "",
-       "items": []
-     }
-
-- IF THE DOCUMENT IS:
-  "PURCHASE ORDER", "PO", "WORK ORDER", "SERVICE ORDER", "INDENT", 
-  "PURCHASE REQUISITION", "LETTER OF INTENT (LOI)", OR "CONTRACT ORDER":
-  -> Mark "isPurchaseOrder": true and proceed to extract.
-
-════════════════════════════════════════════════════════════════════
-RULE 2: BUYER COMPANY NAME & ADDRESS (CRITICAL)
-════════════════════════════════════════════════════════════════════
-A Purchase Order has TWO entities:
-1. BUYER (The client/customer who is placing the order and paying).
-2. VENDOR/SUPPLIER (The seller receiving the order).
-
-- ALWAYS extract the BUYER details under "companyName" and "companyAddress".
-- DO NOT extract the Vendor/Supplier's name (e.g., if "Classic Automation" is the vendor/seller, DO NOT output them as companyName).
-- How to locate the Buyer:
-  a) Look at the top company header/logo (the entity issuing the document).
-  b) Look under "Bill To", "Buyer", "Invoice To", "Purchaser", or "Client".
-- "companyAddress": Full registered or billing address of the Buyer company.
-
-════════════════════════════════════════════════════════════════════
-RULE 3: PO NUMBER EXTRACTION
-════════════════════════════════════════════════════════════════════
-Search thoroughly for:
-- "P.O. Number", "PO No.", "Purchase Order No.", "Order No.", "Ref No.", "SAP PO", "WO No."
-- If only numbers are present after these labels (e.g., 4510066200, 0630032011), capture that full identifier.
-- Do NOT confuse GSTIN, PAN, or Vendor Code with PO Number.
-
-════════════════════════════════════════════════════════════════════
-RULE 4: LINE ITEMS EXTRACTION
-════════════════════════════════════════════════════════════════════
-Extract all items listed in the table:
-- "partNo": Look for "Part No", "Cat No", "Model No", "Material Code", "Item Code". If none, leave empty string "".
-- "desc": Item or service description.
-- "qty": Quantity ordered (clean numeric string).
-- "unit": Unit of measure ("NOS", "SET", "MTR", "KG", "EA", etc.).
-- "rate": Unit price/rate.
-- "discountPercent": Explicit discount percentage if written, else "0".
-- "discountAmount": Explicit discount value if written, else "0".
-- "amount": Line total (Rate * Qty - Discount).
-
-════════════════════════════════════════════════════════════════════
-OUTPUT STRICT JSON ONLY (NO MARKDOWN CODE BLOCKS, NO EXTRA TEXT):
-════════════════════════════════════════════════════════════════════
-{
-  "isPurchaseOrder": true,
-  "companyName": "BUYER_COMPANY_NAME",
-  "companyAddress": "BUYER_FULL_ADDRESS",
-  "poNo": "EXTRACTED_PO_NUMBER",
-  "date": "YYYY-MM-DD",
-  "items": [
-    {
-      "partNo": "",
-      "desc": "Item Description",
-      "qty": "1",
-      "unit": "NOS",
-      "rate": "0",
-      "discountPercent": "0",
-      "discountAmount": "0",
-      "amount": "0"
-    }
-  ]
-}`;
-
+async function callGeminiAIWithRetry(apiKey, base64Pdf) {
     const cleanKey = apiKey.trim();
     let lastError = null;
+
+    // Structured JSON Schema enforce kar rahe hain taaki koi bhi field galat ya miss na ho
+    const jsonSchema = {
+      type: "OBJECT",
+      properties: {
+        documentType: { 
+          type: "STRING", 
+          description: "PURCHASE_ORDER, WORK_ORDER, INDENT, INVOICE, or OTHER" 
+        },
+        isPurchaseOrder: { 
+          type: "BOOLEAN", 
+          description: "Strictly true ONLY for Purchase Orders / Work Orders / Indents. Strictly false for Tax Invoices, Delivery Challans, Receipts." 
+        },
+        buyerCompanyName: { 
+          type: "STRING", 
+          description: "Name of the BUYER/CUSTOMER entity issuing the order (under Bill To / Ordered By / Header). NEVER the vendor/seller receiving payment." 
+        },
+        buyerBillingAddress: { 
+          type: "STRING", 
+          description: "Full registered or billing address of the Buyer." 
+        },
+        poNumber: { 
+          type: "STRING", 
+          description: "Exact Purchase Order No / PO Ref / Work Order No. Never output GSTIN or Vendor Code." 
+        },
+        poDate: { 
+          type: "STRING", 
+          description: "PO Date in YYYY-MM-DD format." 
+        },
+        items: {
+          type: "ARRAY",
+          items: {
+            type: "OBJECT",
+            properties: {
+              partNo: { type: "STRING", description: "Manufacturer part number or catalogue code. Empty if none." },
+              desc: { type: "STRING", description: "Detailed item description." },
+              qty: { type: "STRING", description: "Numeric quantity ordered." },
+              unit: { type: "STRING", description: "Unit like NOS, SET, MTR, KG." },
+              rate: { type: "STRING", description: "Unit price / rate." },
+              discountPercent: { type: "STRING", description: "Discount percentage or 0." },
+              discountAmount: { type: "STRING", description: "Discount amount or 0." },
+              amount: { type: "STRING", description: "Total item amount." }
+            },
+            required: ["desc", "qty", "rate", "amount"]
+          }
+        }
+      },
+      required: ["isPurchaseOrder", "buyerCompanyName", "poNumber", "items"]
+    };
+
+    const systemInstruction = `You are a forensic document auditor specialized in industrial procurement.
+Your task is to parse documents and extract purchase order information with zero tolerance for entity confusion.
+
+CRITICAL EXTRACTION LOGIC:
+1. DOCUMENT CLASSIFICATION:
+   - If the main heading says "TAX INVOICE", "COMMERCIAL INVOICE", "DELIVERY CHALLAN", or "RECEIPT", set isPurchaseOrder to FALSE immediately. Even if it references a previous PO number, an invoice is NOT a purchase order.
+   - If the heading is "PURCHASE ORDER", "PO", "WORK ORDER", "SERVICE ORDER", or "INDENT", set isPurchaseOrder to TRUE.
+
+2. BUYER vs VENDOR SEPARATION:
+   - Identify the TWO parties in the transaction:
+     * SELLER/VENDOR: The company fulfilling the order (e.g. suppliers, contractors). DO NOT put this in buyerCompanyName.
+     * BUYER/CUSTOMER: The organization issuing the PO and paying money. Look for "Bill To:", "Invoice To:", "Purchaser:", "Customer:", or the top letterhead issuer. Put THIS company in buyerCompanyName.
+   - Put the Buyer's billing/registered address in buyerBillingAddress.
+
+3. PO NUMBER DETECTION:
+   - Look strictly under labels like: "P.O. No.", "PO Number:", "Order No.:", "Indent No.:", "SAP PO:".
+   - Do NOT pick up GSTIN (15 digits alphanumeric), PAN (10 digits), or internal Vendor Codes.
+
+4. ITEMS TABLE:
+   - Extract all items with line-level accuracy. Ensure quantities and rates correspond to the item line.`;
 
     for (let rawModel of FAST_MODELS) {
       const cleanModel = rawModel.replace(/^models\//, "");
@@ -1112,14 +1097,18 @@ OUTPUT STRICT JSON ONLY (NO MARKDOWN CODE BLOCKS, NO EXTRA TEXT):
               "x-goog-api-key": cleanKey 
             },
             body: JSON.stringify({
+              system_instruction: {
+                parts: [{ text: systemInstruction }]
+              },
               contents: [{
                 parts: [
-                  { text: prompt },
+                  { text: "Extract all Purchase Order details from this attached document following the exact schema." },
                   { inline_data: { mime_type: "application/pdf", data: base64Pdf } }
                 ]
               }],
               generationConfig: { 
-                response_mime_type: "application/json", 
+                response_mime_type: "application/json",
+                response_schema: jsonSchema,
                 temperature: 0.0 
               }
             })
@@ -1128,14 +1117,26 @@ OUTPUT STRICT JSON ONLY (NO MARKDOWN CODE BLOCKS, NO EXTRA TEXT):
           if (response.ok) {
             const resJson = await response.json();
             const candidate = resJson.candidates?.[0]?.content?.parts?.[0]?.text;
-            let sanitized = (candidate || "").trim();
-            
-            if (sanitized.startsWith("```json")) sanitized = sanitized.replace(/^```json/, "").replace(/```$/, "").trim();
-            else if (sanitized.startsWith("```")) sanitized = sanitized.replace(/^```/, "").replace(/```$/, "").trim();
+            let data = JSON.parse(candidate || "{}");
 
-            const jsonMatch = sanitized.match(/\{[\s\S]*\}/);
-            if (jsonMatch) sanitized = jsonMatch[0];
-            return JSON.parse(sanitized);
+            // Normalize schema properties to match UI expectations
+            return {
+              isPurchaseOrder: data.isPurchaseOrder ?? false,
+              companyName: data.buyerCompanyName || "",
+              companyAddress: data.buyerBillingAddress || "",
+              poNo: data.poNumber || "",
+              date: data.poDate || "",
+              items: (data.items || []).map(it => ({
+                partNo: it.partNo || "",
+                desc: it.desc || "",
+                qty: it.qty || "1",
+                unit: it.unit || "NOS",
+                rate: it.rate || "0",
+                discountPercent: it.discountPercent || "0",
+                discountAmount: it.discountAmount || "0",
+                amount: it.amount || "0"
+              }))
+            };
           }
 
           const errData = await response.json().catch(() => ({}));
