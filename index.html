@@ -1000,37 +1000,40 @@
       reader.onerror = reject;
     });
   }
-
-  async function callGeminiAIWithRetry(apiKey, base64Pdf) {
+async function callGeminiAIWithRetry(apiKey, base64Pdf) {
     const cleanKey = apiKey.trim();
     let lastError = null;
 
     const systemInstruction = `You are a zero-tolerance industrial procurement auditor.
-Carefully review the PDF document page-by-page.
+Carefully extract purchase order data with exact financial and mathematical precision.
 
 RULE 1: STRICT INVOICE & BILL REJECTION
-- If the document contains any of the following titles or indicators:
-  "TAX INVOICE", "INVOICE", "COMMERCIAL INVOICE", "PROFORMA INVOICE", "RETAIL INVOICE",
-  "DELIVERY CHALLAN", "E-WAY BILL", "IRN NO", "BILL OF SUPPLY", "PAYMENT VOUCHER"
-  -> THIS IS A BILL/INVOICE, NOT A PURCHASE ORDER!
-  -> Even if it contains "Buyer PO Ref" or "PO No.", return isPurchaseOrder: false immediately.
+- If document says "TAX INVOICE", "COMMERCIAL INVOICE", "RETAIL INVOICE", "DELIVERY CHALLAN", "E-WAY BILL", "IRN NO":
+  -> Mark isPurchaseOrder: false immediately.
 
-RULE 2: STRICT BUYER VS VENDOR EXTRACTION
-- On a Purchase Order, there are TWO parties:
-  1. BUYER (The client/customer company issuing the order and paying). Look under top letterhead, "Bill To:", "Buyer:", "Invoice To:", "Purchaser:".
-  2. VENDOR/SELLER (The supplier supplying the parts).
-- Under buyerCompanyName, output ONLY the BUYER organization. NEVER output the vendor/supplier name (e.g., do NOT output Classic Automation as buyerCompanyName).
-- Under buyerBillingAddress, output the registered or billing address of that BUYER company.
+RULE 2: BUYER VS VENDOR SEPARATION
+- Under buyerCompanyName, output ONLY the BUYER organization (Client/Customer). NEVER output "Classic Automation" or the vendor.
+- Under buyerBillingAddress, output the BUYER's registered/plant address.
 
-RULE 3: PO NUMBER EXTRACTION
-- Extract the PO Number / Order Number / Indent Number written next to labels like "P.O. No.", "Order Ref:", "PO #", "SAP PO:".
-- Do NOT confuse GSTIN (15 characters) or Vendor Code with PO Number.`;
+RULE 3: MATHEMATICAL PRECISION FOR LINE ITEM AMOUNTS (CRITICAL)
+For each row in the items table:
+- "qty": Pure numeric quantity (e.g., "10", "2.5"). Strip text like "NOS" from qty.
+- "rate": Base unit price (Rate per single unit) before tax/discount. Strip "₹", "Rs.", "$", and commas.
+- "discountPercent": Percentage discount on this line item if stated (e.g. "5", "10"). Else "0".
+- "discountAmount": Absolute discount amount deducted on this item if stated. Else "0".
+- "amount": The exact BASIC / NET taxable line-item total (before taxes like CGST/SGST/IGST).
+  * Formula: amount = (qty * rate) - discountAmount
+  * DO NOT output the PO Grand Total in the line item amount!
+  * DO NOT include GST/taxes in this line amount unless tax is explicitly built into the item rate.
+  * Only clean numbers and decimal points (e.g., "15400.00", NOT "Rs. 15,400/-").
+
+RULE 4: PO NUMBER
+- Exact PO / Work Order / Indent Number only. Do not confuse GSTIN (15 chars) or Vendor Code.`;
 
     const jsonSchema = {
       type: "OBJECT",
       properties: {
         isPurchaseOrder: { type: "BOOLEAN" },
-        documentType: { type: "STRING" },
         buyerCompanyName: { type: "STRING" },
         buyerBillingAddress: { type: "STRING" },
         poNumber: { type: "STRING" },
@@ -1042,12 +1045,12 @@ RULE 3: PO NUMBER EXTRACTION
             properties: {
               partNo: { type: "STRING" },
               desc: { type: "STRING" },
-              qty: { type: "STRING" },
-              unit: { type: "STRING" },
-              rate: { type: "STRING" },
-              discountPercent: { type: "STRING" },
-              discountAmount: { type: "STRING" },
-              amount: { type: "STRING" }
+              qty: { type: "STRING", description: "Numeric quantity only, no units" },
+              unit: { type: "STRING", description: "Unit e.g. NOS, SET, MTR, EA" },
+              rate: { type: "STRING", description: "Clean numeric unit rate without currency symbols" },
+              discountPercent: { type: "STRING", description: "Discount percentage or 0" },
+              discountAmount: { type: "STRING", description: "Discount amount in currency or 0" },
+              amount: { type: "STRING", description: "Exact line total: (qty * rate) - discount. Never Grand Total." }
             },
             required: ["desc", "qty", "rate", "amount"]
           }
@@ -1074,7 +1077,7 @@ RULE 3: PO NUMBER EXTRACTION
               },
               contents: [{
                 parts: [
-                  { text: "Extract all Purchase Order details from this attached document following the exact schema." },
+                  { text: "Extract all Purchase Order details with accurate line-item quantities, unit rates, and individual line amounts without currency symbols." },
                   { inline_data: { mime_type: "application/pdf", data: base64Pdf } }
                 ]
               }],
@@ -1097,16 +1100,45 @@ RULE 3: PO NUMBER EXTRACTION
               companyAddress: (data.buyerBillingAddress || "").trim(),
               poNo: (data.poNumber || "").trim(),
               date: (data.poDate || "").trim(),
-              items: (data.items || []).map(it => ({
-                partNo: it.partNo || "",
-                desc: it.desc || "",
-                qty: it.qty || "1",
-                unit: it.unit || "NOS",
-                rate: it.rate || "0",
-                discountPercent: it.discountPercent || "0",
-                discountAmount: it.discountAmount || "0",
-                amount: it.amount || "0"
-              }))
+              items: (data.items || []).map(it => {
+                // Client-side cleanup of numbers
+                const cleanQty = String(it.qty || "1").replace(/[^0-9.]/g, '') || "1";
+                const cleanRate = String(it.rate || "0").replace(/[^0-9.]/g, '') || "0";
+                const cleanDiscPct = String(it.discountPercent || "0").replace(/[^0-9.]/g, '') || "0";
+                let cleanDiscAmt = String(it.discountAmount || "0").replace(/[^0-9.]/g, '') || "0";
+                let cleanAmt = String(it.amount || "0").replace(/[^0-9.]/g, '') || "0";
+
+                const q = parseFloat(cleanQty) || 1;
+                const r = parseFloat(cleanRate) || 0;
+                const dp = parseFloat(cleanDiscPct) || 0;
+                let da = parseFloat(cleanDiscAmt) || 0;
+                let a = parseFloat(cleanAmt) || 0;
+
+                // Auto-calculate discount if % present but amount 0
+                if (dp > 0 && da === 0 && r > 0) {
+                  da = (q * r * dp) / 100;
+                  cleanDiscAmt = da.toFixed(2);
+                }
+
+                // If AI returned 0 or Grand Total mismatch, enforce (Qty * Rate) - Discount
+                if ((a === 0 || isNaN(a)) && r > 0) {
+                  a = (q * r) - da;
+                  cleanAmt = a.toFixed(2);
+                } else if (a > 0) {
+                  cleanAmt = a.toFixed(2);
+                }
+
+                return {
+                  partNo: it.partNo || "",
+                  desc: it.desc || "",
+                  qty: cleanQty,
+                  unit: it.unit || "NOS",
+                  rate: cleanRate,
+                  discountPercent: cleanDiscPct,
+                  discountAmount: cleanDiscAmt,
+                  amount: cleanAmt
+                };
+              })
             };
           }
 
@@ -1149,14 +1181,38 @@ RULE 3: PO NUMBER EXTRACTION
         input.setAttribute('data-key', key);
         if (key === 'sNo') input.className = 'sno-input';
         input.value = (data[key] !== undefined && data[key] !== null) ? data[key] : '';
-        input.addEventListener('input', updateNumbersAndCount);
+
+        // Auto-recalculate line amount on manual edits
+        if (['qty', 'rate', 'discountPercent', 'discountAmount'].includes(key)) {
+          input.addEventListener('input', () => {
+            const rowQty = parseFloat(tr.querySelector('input[data-key="qty"]')?.value) || 0;
+            const rowRate = parseFloat(tr.querySelector('input[data-key="rate"]')?.value) || 0;
+            let rowDiscPct = parseFloat(tr.querySelector('input[data-key="discountPercent"]')?.value) || 0;
+            let rowDiscAmtInput = tr.querySelector('input[data-key="discountAmount"]');
+            let rowAmtInput = tr.querySelector('input[data-key="amount"]');
+
+            let rowDiscAmt = parseFloat(rowDiscAmtInput?.value) || 0;
+
+            if (key === 'discountPercent' && rowDiscPct > 0) {
+              rowDiscAmt = (rowQty * rowRate * rowDiscPct) / 100;
+              if (rowDiscAmtInput) rowDiscAmtInput.value = rowDiscAmt.toFixed(2);
+            }
+
+            const finalRowAmt = Math.max(0, (rowQty * rowRate) - rowDiscAmt);
+            if (rowAmtInput) rowAmtInput.value = finalRowAmt.toFixed(2);
+            updateNumbersAndCount();
+          });
+        } else {
+          input.addEventListener('input', updateNumbersAndCount);
+        }
+
         td.appendChild(input);
       }
       tr.appendChild(td);
     });
     tableBody.appendChild(tr);
   }
-
+     
   addRowBtn.addEventListener('click', () => {
     tableBox.style.display = 'block';
     addRowToTable({ sNo: tableBody.querySelectorAll('tr').length + 1 });
