@@ -27,7 +27,6 @@ app.add_middleware(
 )
 
 PROCESSED_FILE = "processed_po.json"
-# Limit set to 1000000000 as requested
 MAX_FETCH_EMAILS = 1000000000
 MAX_FILE_SIZE_MB = 25
 
@@ -125,7 +124,6 @@ def sync_fetch_po_pdfs(req: GmailFetchRequest) -> dict:
             return {"files": [], "message": "No emails found matching criteria."}
 
         email_uids = message_numbers[0].split()
-        # Takes all matching emails up to MAX_FETCH_EMAILS
         recent_uids = email_uids[-MAX_FETCH_EMAILS:]
         recent_uids.reverse()
 
