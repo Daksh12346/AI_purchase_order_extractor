@@ -17,7 +17,7 @@ import uvicorn
 
 app = FastAPI(title="AI Purchase Order Extractor System")
 
-# CORS Configuration
+# Clean CORS setup
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,7 +27,7 @@ app.add_middleware(
 )
 
 PROCESSED_FILE = "processed_po.json"
-MAX_FETCH_EMAILS = 10
+MAX_FETCH_EMAILS = 15
 MAX_FILE_SIZE_MB = 15
 
 
@@ -90,6 +90,7 @@ def sync_fetch_po_pdfs(req: GmailFetchRequest) -> dict:
             status_code=400, detail="Gmail address and 16-character App Password are required."
         )
 
+    mail = None
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(user_email, app_password)
@@ -112,12 +113,14 @@ def sync_fetch_po_pdfs(req: GmailFetchRequest) -> dict:
             except ValueError:
                 pass
 
+        # Robust sanitation for spaces/hyphens in PO number & Company names
         if req.query and req.query.strip():
-            clean_q = req.query.strip().replace('"', "")
-            gmail_query_parts.append(f'"{clean_q}"')
+            raw_q = req.query.strip().replace('"', '').replace("'", "")
+            gmail_query_parts.append(f'({raw_q})')
 
-        full_query = " ".join(gmail_query_parts)
-        status, message_numbers = mail.uid("search", None, f'X-GM-RAW "{full_query}"')
+        full_raw_query = " ".join(gmail_query_parts)
+        
+        status, message_numbers = mail.uid("search", None, 'X-GM-RAW', f'"{full_raw_query}"')
 
         if status != "OK" or not message_numbers[0]:
             return {"files": [], "message": "No emails found matching criteria."}
@@ -185,10 +188,11 @@ def sync_fetch_po_pdfs(req: GmailFetchRequest) -> dict:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading Gmail: {str(e)}")
     finally:
-        try:
-            mail.logout()
-        except Exception:
-            pass
+        if mail:
+            try:
+                mail.logout()
+            except Exception:
+                pass
 
 
 @app.get("/", response_class=HTMLResponse)
