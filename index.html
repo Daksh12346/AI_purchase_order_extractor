@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AI Purchase Order Extractor</title>
+  <title>AI Purchase Order Extractor (OpenAI Engine)</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 
   <style>
     :root {
-      --primary: #0F6B5C;
-      --primary-dark: #0B4F44;
+      --primary: #10A37F;
+      --primary-dark: #0E8A6C;
       --border: #D9DEE3;
       --bg: #F4F6F8;
       --ink: #16202A;
@@ -437,16 +437,16 @@
 <div class="container">
   <div class="header-box">
     <h1>AI Purchase Order Extractor</h1>
-    <p class="subtitle">Complete Procurement System (Instant Extraction, Clean Engine, Accurate Rates)</p>
+    <p class="subtitle">Complete Procurement System (Powered by OpenAI GPT-4o / GPT-4o-mini)</p>
 
     <div class="api-key-container">
       <div class="api-key-box">
-        <label for="apiKeyInput1">🔑 Gemini API Key 1:</label>
-        <input type="password" id="apiKeyInput1" placeholder="Paste your 1st Gemini API Key (AIzaSy...)">
+        <label for="apiKeyInput1">🔑 OpenAI API Key 1:</label>
+        <input type="password" id="apiKeyInput1" placeholder="Paste OpenAI API Key (sk-proj-...)">
       </div>
       <div class="api-key-box">
-        <label for="apiKeyInput2">🔑 Gemini API Key 2:</label>
-        <input type="password" id="apiKeyInput2" placeholder="Paste your 2nd Gemini API Key (Optional)">
+        <label for="apiKeyInput2">🔑 OpenAI API Key 2:</label>
+        <input type="password" id="apiKeyInput2" placeholder="Paste 2nd OpenAI API Key (Optional)">
       </div>
     </div>
 
@@ -497,7 +497,7 @@
 
     <div class="upload-zone">
       <input type="file" id="pdfInput" accept=".pdf,application/pdf" multiple>
-      <div style="font-size: 12px; color: #888; margin-top: 6px;">Upload PDF documents (invoices/bills will be automatically skipped)</div>
+      <div style="font-size: 12px; color: #888; margin-top: 6px;">Upload all PDF documents (invoices/bills will be automatically skipped)</div>
     </div>
 
     <div class="action-buttons">
@@ -506,7 +506,7 @@
       <button type="button" class="btn-secondary" id="clearHistoryBtn" title="Deletes backend memory of processed POs">🗑 Reset Processed PO History</button>
     </div>
 
-    <div class="status-text" id="statusText">Ready. Provide Gemini API Key and select files or sync Gmail.</div>
+    <div class="status-text" id="statusText">Ready. Provide OpenAI API Key and select files or sync Gmail.</div>
   </div>
 
   <div class="metrics-grid" id="metricsGrid" style="display: none;">
@@ -608,22 +608,22 @@
   let isLiveProcessing = false;
   let abortRequested = false;
 
-  // Gemini 3.0+ Production Endpoints
-  const VERSION_3_MODELS = [
-    "gemini-3.0-flash",
-    "gemini-3.0-pro"
+  // Primary Multimodal Models on OpenAI
+  const OPENAI_MODELS = [
+    "gpt-4o-mini",
+    "gpt-4o"
   ];
 
   const BACKEND_BASE = window.location.origin;
 
-  if (localStorage.getItem('gemini_api_key_custom_1')) {
-    apiKeyInput1.value = localStorage.getItem('gemini_api_key_custom_1');
-  } else if (localStorage.getItem('gemini_api_key')) {
-    apiKeyInput1.value = localStorage.getItem('gemini_api_key');
+  if (localStorage.getItem('openai_api_key_custom_1')) {
+    apiKeyInput1.value = localStorage.getItem('openai_api_key_custom_1');
+  } else if (localStorage.getItem('openai_api_key')) {
+    apiKeyInput1.value = localStorage.getItem('openai_api_key');
   }
 
-  if (localStorage.getItem('gemini_api_key_custom_2')) {
-    apiKeyInput2.value = localStorage.getItem('gemini_api_key_custom_2');
+  if (localStorage.getItem('openai_api_key_custom_2')) {
+    apiKeyInput2.value = localStorage.getItem('openai_api_key_custom_2');
   }
 
   if (localStorage.getItem('gmail_email')) {
@@ -631,10 +631,10 @@
   }
 
   apiKeyInput1.addEventListener('input', () => {
-    localStorage.setItem('gemini_api_key_custom_1', apiKeyInput1.value.trim());
+    localStorage.setItem('openai_api_key_custom_1', apiKeyInput1.value.trim());
   });
   apiKeyInput2.addEventListener('input', () => {
-    localStorage.setItem('gemini_api_key_custom_2', apiKeyInput2.value.trim());
+    localStorage.setItem('openai_api_key_custom_2', apiKeyInput2.value.trim());
   });
   gmailEmail.addEventListener('input', () => {
     localStorage.setItem('gmail_email', gmailEmail.value.trim());
@@ -642,7 +642,7 @@
 
   stopBtn.addEventListener('click', () => {
     abortRequested = true;
-    statusText.textContent = "Stopping extraction... Finishing current file.";
+    statusText.textContent = "Stopping extraction... Finishing pending file.";
     stopBtn.disabled = true;
   });
 
@@ -718,7 +718,7 @@
   });
 
   clearHistoryBtn.addEventListener('click', async () => {
-    if (confirm("Reset backend PO history?")) {
+    if (confirm("Reset backend PO memory?")) {
       try {
         await fetch(`${BACKEND_BASE}/clear-history`, { method: "POST" });
         alert("Processed PO history cleared.");
@@ -731,7 +731,7 @@
   async function countdownWait(seconds, reason = "Rate limit hit") {
     let remaining = Math.ceil(seconds);
     while (remaining > 0 && !abortRequested) {
-      statusText.textContent = `⏳ ${reason}. Retrying in ${remaining}s...`;
+      statusText.textContent = `⏳ ${reason}. Waiting ${remaining}s before auto-retrying...`;
       await sleep(1000);
       remaining--;
     }
@@ -740,9 +740,6 @@
   function isExplicitlyNonPoFile(filename) {
     if (!filename || typeof filename !== 'string') return false;
     const lower = filename.toLowerCase();
-
-    const poTerms = ['po', 'purchase', 'order', 'indent', 'wo', 'workorder'];
-    if (poTerms.some(t => lower.includes(t))) return false;
 
     const blockedTerms = ['tax invoice', 'retail invoice', 'delivery challan', 'salary slip', 'receipt_'];
     return blockedTerms.some(t => lower.includes(t));
@@ -953,6 +950,7 @@
   async function processPdfItems(fileList, keysList, alreadyProcessedSet = new Set(), forceReprocess = false) {
     let newlyExtracted = 0;
     let skippedCount = 0;
+    let failedCount = 0;
     let processedTotal = 0;
 
     isLiveProcessing = true;
@@ -983,21 +981,22 @@
         if (isExplicitlyNonPoFile(fileName)) {
           skippedCount++;
           processedTotal++;
-          statusText.textContent = `[${processedTotal}/${fileList.length}] Skipped invoice: ${fileName}`;
+          statusText.textContent = `[${processedTotal}/${fileList.length}] Filtered non-PO file: ${fileName}`;
           continue;
         }
 
         const chosenApiKey = getNextApiKey(keysList);
         const keyLabel = keysList.indexOf(chosenApiKey) + 1;
-        statusText.textContent = `[${processedTotal + 1}/${fileList.length}] Analyzing [Key ${keyLabel}]: ${fileName}...`;
+        statusText.textContent = `[${processedTotal + 1}/${fileList.length}] Analyzing with OpenAI [Key ${keyLabel}]: ${fileName}...`;
 
         try {
-          const extractedData = await callGeminiAIWithRetry(chosenApiKey, keysList, fileObj.base64);
+          const extractedData = await callOpenAIWithRetry(chosenApiKey, keysList, fileObj.base64, fileName);
 
-          if (!extractedData || extractedData.isPurchaseOrder === false) {
+          const items = Array.isArray(extractedData?.items) ? extractedData.items : [];
+          if (!extractedData || (extractedData.isPurchaseOrder === false && items.length === 0)) {
             skippedCount++;
             processedTotal++;
-            statusText.textContent = `[${processedTotal}/${fileList.length}] Skipped Non-PO: ${fileName}`;
+            statusText.textContent = `[${processedTotal}/${fileList.length}] Skipped Non-PO / No items: ${fileName}`;
             continue;
           }
 
@@ -1011,11 +1010,10 @@
 
           if (!forceReprocess && extractedPoNo && alreadyProcessedSet.has(extractedPoNo)) {
             processedTotal++;
-            statusText.textContent = `[${processedTotal}/${fileList.length}] Previously saved: ${extractedPoNo}`;
+            statusText.textContent = `[${processedTotal}/${fileList.length}] Previously processed: ${extractedPoNo}`;
             continue;
           }
 
-          const items = Array.isArray(extractedData.items) ? extractedData.items : [];
           if (items.length > 0) {
             let resolvedCompany = String(extractedData.companyName || "").trim();
             let resolvedAddress = sanitizeBuyerAddress(extractedData.companyAddress);
@@ -1086,9 +1084,9 @@
           }
           processedTotal++;
         } catch (docErr) {
-          skippedCount++;
+          failedCount++;
           processedTotal++;
-          statusText.textContent = `Error in ${fileName}: ${docErr.message}`;
+          statusText.textContent = `❌ Failed ${fileName}: ${docErr.message}`;
         }
       }
     }
@@ -1103,9 +1101,14 @@
     isLiveProcessing = false;
     stopBtn.style.display = 'none';
     updateNumbersAndCount();
-    statusText.textContent = abortRequested
-      ? `Stopped by user! Extracted ${newlyExtracted} item(s).`
-      : `Complete! Added ${newlyExtracted} item(s). Skipped ${skippedCount} non-PO files.`;
+
+    if (abortRequested) {
+      statusText.textContent = `Stopped. Extracted ${newlyExtracted} item(s).`;
+    } else if (failedCount > 0) {
+      statusText.textContent = `Completed with issues. Extracted: ${newlyExtracted} items | API Errors: ${failedCount} files | Skipped: ${skippedCount}`;
+    } else {
+      statusText.textContent = `Extraction Finished! Extracted: ${newlyExtracted} items | Skipped: ${skippedCount} non-PO files.`;
+    }
   }
 
   fetchGmailBtn.addEventListener('click', async () => {
@@ -1114,7 +1117,7 @@
     const passVal = gmailPassword.value.trim();
     const forceReprocess = forceReprocessCheck.checked;
 
-    if (keysList.length === 0) return alert("Please enter at least one Gemini API Key.");
+    if (keysList.length === 0) return alert("Please enter at least one OpenAI API Key.");
     if (!emailVal || !passVal) return alert("Please enter Gmail Address & App Password.");
 
     fetchGmailBtn.disabled = true;
@@ -1169,7 +1172,7 @@
 
   processBtn.addEventListener('click', async () => {
     const keysList = getActiveApiKeys();
-    if (keysList.length === 0) return alert("Enter at least one Gemini API key.");
+    if (keysList.length === 0) return alert("Enter at least one OpenAI API key.");
     if (!pdfInput.files || pdfInput.files.length === 0) return alert("Select files first.");
 
     processBtn.disabled = true;
@@ -1209,19 +1212,18 @@
     });
   }
 
-  async function callGeminiAIWithRetry(initialKey, allKeysList, base64Pdf) {
+  async function callOpenAIWithRetry(initialKey, allKeysList, base64Pdf, fileName = "document.pdf") {
     let candidateKeys = [initialKey, ...allKeysList.filter(k => k !== initialKey)];
     let lastError = null;
 
-    const promptText = `You are an expert ERP Purchase Order Data Extractor.
-Extract procurement line items from this document.
-
+    const systemPrompt = `You are an expert ERP Purchase Order Data Extractor.
+Extract procurement items from this PDF document into valid JSON.
 RULES:
-1. ONLY reject (isPurchaseOrder: false) if this document is strictly an invoice, payment receipt, or transport challan.
-2. If it is a Purchase Order, Indent, Work Order, LOI, or Supply Contract, ALWAYS set isPurchaseOrder: true.
-3. Classic Automation is the vendor/supplier. Extract the BUYER / CLIENT company name and address.
-4. Extract every single item into items array.
-5. Return strictly a raw JSON object with NO markdown ticks:
+1. If this document is strictly an invoice, challan, or receipt, set isPurchaseOrder: false.
+2. If it is a Purchase Order, Indent, Work Order, LOI, or Supply Contract, set isPurchaseOrder: true.
+3. Classic Automation is the vendor/seller. Extract the CLIENT / BUYER organization name and billing address.
+4. Extract all line items from the table: part number, description, quantity, rate, discount, and total amount.
+5. Return strictly a JSON object with this structure:
 {
   "isPurchaseOrder": true,
   "buyerCompanyName": "...",
@@ -1232,12 +1234,12 @@ RULES:
     {
       "partNo": "...",
       "desc": "...",
-      "qty": "...",
+      "qty": "1",
       "unit": "NOS",
-      "rate": "...",
+      "rate": "0.00",
       "discountPercent": "0",
       "discountAmount": "0.00",
-      "amount": "..."
+      "amount": "0.00"
     }
   ]
 }`;
@@ -1246,41 +1248,50 @@ RULES:
       const cleanKey = (key || "").trim();
       if (!cleanKey) continue;
 
-      for (let modelName of VERSION_3_MODELS) {
+      for (let modelName of OPENAI_MODELS) {
         if (abortRequested) throw new Error("Cancelled by user.");
 
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(cleanKey)}`;
+        const url = "https://api.openai.com/v1/chat/completions";
 
         try {
           const response = await fetch(url, {
             method: "POST",
             headers: {
-              "Content-Type": "application/json"
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${cleanKey}`
             },
             body: JSON.stringify({
-              contents: [{
-                role: "user",
-                parts: [
-                  { text: promptText },
-                  { inline_data: { mime_type: "application/pdf", data: base64Pdf } }
-                ]
-              }],
-              generationConfig: {
-                response_mime_type: "application/json",
-                temperature: 0.1
-              }
+              model: modelName,
+              response_format: { type: "json_object" },
+              temperature: 0.1,
+              messages: [
+                {
+                  role: "system",
+                  content: systemPrompt
+                },
+                {
+                  role: "user",
+                  content: [
+                    {
+                      type: "text",
+                      text: "Extract all items from this attached Purchase Order document in pure JSON format."
+                    },
+                    {
+                      type: "file",
+                      file: {
+                        filename: fileName,
+                        file_data: `data:application/pdf;base64,${base64Pdf}`
+                      }
+                    }
+                  ]
+                }
+              ]
             })
           });
 
           if (response.ok) {
             const resJson = await response.json();
-            if (!resJson.candidates || resJson.candidates.length === 0) {
-              lastError = "No response candidates returned.";
-              continue;
-            }
-
-            let candidateText = resJson.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
-            candidateText = candidateText.replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim();
+            const candidateText = resJson.choices?.[0]?.message?.content || "{}";
 
             let data = {};
             try {
@@ -1294,7 +1305,8 @@ RULES:
               }
             }
 
-            if (data.isPurchaseOrder === false) {
+            const itemsArray = Array.isArray(data.items) ? data.items : [];
+            if (data.isPurchaseOrder === false && itemsArray.length === 0) {
               return { isPurchaseOrder: false };
             }
 
@@ -1304,7 +1316,7 @@ RULES:
               companyAddress: (data.buyerBillingAddress || "").trim(),
               poNo: (data.poNumber || "PO-" + Math.floor(1000 + Math.random() * 9000)).trim(),
               poDate: (data.poDate || "").trim(),
-              items: (data.items || []).map(it => {
+              items: itemsArray.map(it => {
                 function cleanNumberString(val) {
                   if (val === undefined || val === null) return "0";
                   let str = String(val).trim().replace(/[₹RsINR$\s/A-Za-z]/g, '');
@@ -1355,16 +1367,16 @@ RULES:
           const errMsg = errData.error?.message || `HTTP ${response.status}`;
 
           if (response.status === 401) {
-            lastError = "Invalid API key provided. Please re-check API key.";
+            lastError = "Invalid OpenAI API Key! Please verify your API key in OpenAI Dashboard.";
             break;
           }
 
           if (response.status === 429) {
             if (candidateKeys.length > 1 && key === candidateKeys[0]) {
-              statusText.textContent = `Key 1 rate limit reached. Switching to Key 2...`;
+              statusText.textContent = `OpenAI Key 1 rate limited. Switching to Key 2...`;
               break;
             } else {
-              await countdownWait(5, "Model busy");
+              await countdownWait(5, "OpenAI rate limit hit");
               continue;
             }
           }
@@ -1375,7 +1387,7 @@ RULES:
         }
       }
     }
-    throw new Error(lastError || "Could not complete extraction on available keys.");
+    throw new Error(lastError || "OpenAI extraction failed across models.");
   }
 
   function addRowToTable(data = {}) {
