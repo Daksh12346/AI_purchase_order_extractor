@@ -4,7 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AI Purchase Order Extractor</title>
+  <!-- XLSX Library -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <!-- PDF.js Engine for OpenAI Compatibility -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 
   <style>
     :root {
@@ -434,7 +437,7 @@
 <div class="container">
   <div class="header-box">
     <h1>AI Purchase Order Extractor</h1>
-    <p class="subtitle">Procurement Extraction System (Direct OpenAI Integration)</p>
+    <p class="subtitle">Complete Procurement System (Optimized OpenAI GPT-4o / GPT-4o-mini)</p>
 
     <div class="api-key-container">
       <div class="api-key-box">
@@ -490,7 +493,7 @@
 
     <div class="upload-zone">
       <input type="file" id="pdfInput" accept=".pdf,application/pdf" multiple>
-      <div style="font-size: 12px; color: #888; margin-top: 6px;">Upload all PDF documents</div>
+      <div style="font-size: 12px; color: #888; margin-top: 6px;">Upload all PDF documents (invoices/bills will be automatically skipped)</div>
     </div>
 
     <div class="action-buttons">
@@ -561,6 +564,10 @@
 </div>
 
 <script>
+  if (typeof pdfjsLib !== 'undefined') {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  }
+
   const apiKeyInput = document.getElementById('apiKeyInput');
   const gmailEmail = document.getElementById('gmailEmail');
   const gmailPassword = document.getElementById('gmailPassword');
@@ -598,11 +605,6 @@
 
   let isLiveProcessing = false;
   let abortRequested = false;
-
-  const OPENAI_MODELS = [
-    "gpt-4o-mini",
-    "gpt-4o"
-  ];
 
   const BACKEND_BASE = window.location.origin;
 
@@ -912,6 +914,45 @@
     updateNumbersAndCount();
   });
 
+  // Extract raw text or image from PDF in browser
+  async function parsePdfContent(base64Pdf) {
+    try {
+      const binaryString = atob(base64Pdf);
+      const len = binaryString.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+
+      const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
+      let textContent = "";
+
+      const pagesToRead = Math.min(pdf.numPages, 5);
+      for (let p = 1; p <= pagesToRead; p++) {
+        const page = await pdf.getPage(p);
+        const tokenized = await page.getTextContent();
+        const pageText = tokenized.items.map(it => it.str).join(' ');
+        textContent += pageText + "\n";
+      }
+
+      if (textContent.trim().length > 60) {
+        return { type: "text", content: textContent.trim() };
+      }
+
+      // If scanned, render first page as image
+      const firstPage = await pdf.getPage(1);
+      const viewport = firstPage.getViewport({ scale: 1.5 });
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      await firstPage.render({ canvasContext: ctx, viewport: viewport }).promise;
+      return { type: "image", content: canvas.toDataURL('image/jpeg', 0.85) };
+    } catch (e) {
+      return { type: "text", content: "" };
+    }
+  }
+
   async function processPdfItems(fileList, apiKey, alreadyProcessedSet = new Set(), forceReprocess = false) {
     let newlyExtracted = 0;
     let skippedCount = 0;
@@ -950,10 +991,11 @@
           continue;
         }
 
-        statusText.textContent = `[${processedTotal + 1}/${fileList.length}] Analyzing: ${fileName}...`;
+        statusText.textContent = `[${processedTotal + 1}/${fileList.length}] Reading & Extracting: ${fileName}...`;
 
         try {
-          const extractedData = await callOpenAI(apiKey, fileObj.base64, fileName);
+          const parsedContent = await parsePdfContent(fileObj.base64);
+          const extractedData = await callOpenAI(apiKey, parsedContent);
 
           const items = Array.isArray(extractedData?.items) ? extractedData.items : [];
           if (!extractedData || (extractedData.isPurchaseOrder === false && items.length === 0)) {
@@ -1049,7 +1091,7 @@
         } catch (docErr) {
           failedCount++;
           processedTotal++;
-          statusText.textContent = `❌ Failed ${fileName}: ${docErr.message}`;
+          statusText.textContent = `❌ Error on ${fileName}: ${docErr.message}`;
         }
       }
     }
@@ -1068,9 +1110,9 @@
     if (abortRequested) {
       statusText.textContent = `Stopped. Extracted ${newlyExtracted} item(s).`;
     } else if (failedCount > 0) {
-      statusText.textContent = `Completed with issues. Extracted: ${newlyExtracted} items | API Errors: ${failedCount} files | Skipped: ${skippedCount}`;
+      statusText.textContent = `Complete. Extracted: ${newlyExtracted} items | API Errors: ${failedCount} files | Skipped: ${skippedCount}`;
     } else {
-      statusText.textContent = `Extraction Finished! Extracted: ${newlyExtracted} items | Skipped: ${skippedCount} non-PO files.`;
+      statusText.textContent = `Done! Extracted: ${newlyExtracted} items | Skipped: ${skippedCount} non-PO files.`;
     }
   }
 
@@ -1175,15 +1217,15 @@
     });
   }
 
-  async function callOpenAI(apiKey, base64Pdf, fileName = "document.pdf") {
+  async function callOpenAI(apiKey, parsedContent) {
     const systemPrompt = `You are an expert ERP Purchase Order Data Extractor.
-Extract procurement items from this PDF document into valid JSON.
+Extract procurement items into valid JSON.
 RULES:
 1. If this document is strictly an invoice, challan, or receipt, set isPurchaseOrder: false.
 2. If it is a Purchase Order, Indent, Work Order, LOI, or Supply Contract, set isPurchaseOrder: true.
 3. Classic Automation is the vendor/seller. Extract the CLIENT / BUYER organization name and billing address.
 4. Extract all line items from the table: part number, description, quantity, rate, discount, and total amount.
-5. Return strictly a JSON object with this structure:
+5. Return strictly a JSON object:
 {
   "isPurchaseOrder": true,
   "buyerCompanyName": "...",
@@ -1204,141 +1246,120 @@ RULES:
   ]
 }`;
 
-    let lastError = null;
+    const userMessageContent = [];
 
-    for (let modelName of OPENAI_MODELS) {
-      if (abortRequested) throw new Error("Cancelled by user.");
+    if (parsedContent.type === "image") {
+      userMessageContent.push({
+        type: "text",
+        text: "Extract all purchase order line items from this scanned document image in strict JSON."
+      });
+      userMessageContent.push({
+        type: "image_url",
+        image_url: { url: parsedContent.content }
+      });
+    } else {
+      userMessageContent.push({
+        type: "text",
+        text: `Extract all purchase order line items from this document text in strict JSON:\n\n${parsedContent.content}`
+      });
+    }
 
-      const url = "https://api.openai.com/v1/chat/completions";
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        response_format: { type: "json_object" },
+        temperature: 0.1,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userMessageContent }
+        ]
+      })
+    });
 
-      try {
-        const response = await fetch(url, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${apiKey}`
-          },
-          body: JSON.stringify({
-            model: modelName,
-            response_format: { type: "json_object" },
-            temperature: 0.1,
-            messages: [
-              {
-                role: "system",
-                content: systemPrompt
-              },
-              {
-                role: "user",
-                content: [
-                  {
-                    type: "text",
-                    text: "Extract all items from this attached Purchase Order document in pure JSON format."
-                  },
-                  {
-                    type: "file",
-                    file: {
-                      filename: fileName,
-                      file_data: `data:application/pdf;base64,${base64Pdf}`
-                    }
-                  }
-                ]
-              }
-            ]
-          })
-        });
+    if (!response.ok) {
+      const errData = await response.json().catch(() => ({}));
+      const errMsg = errData.error?.message || `HTTP ${response.status}`;
+      if (response.status === 401) {
+        throw new Error("Invalid OpenAI API Key. Please verify key.");
+      }
+      if (response.status === 429) {
+        throw new Error("OpenAI Quota Limit Reached. Check billing balance.");
+      }
+      throw new Error(errMsg);
+    }
 
-        if (response.ok) {
-          const resJson = await response.json();
-          const candidateText = resJson.choices?.[0]?.message?.content || "{}";
+    const resJson = await response.json();
+    const candidateText = resJson.choices?.[0]?.message?.content || "{}";
 
-          let data = {};
-          try {
-            data = JSON.parse(candidateText);
-          } catch (e) {
-            const match = candidateText.match(/\{[\s\S]*\}/);
-            if (match) {
-              data = JSON.parse(match[0]);
+    let data = {};
+    try {
+      data = JSON.parse(candidateText);
+    } catch (e) {
+      const match = candidateText.match(/\{[\s\S]*\}/);
+      if (match) data = JSON.parse(match[0]);
+    }
+
+    const itemsArray = Array.isArray(data.items) ? data.items : [];
+    if (data.isPurchaseOrder === false && itemsArray.length === 0) {
+      return { isPurchaseOrder: false };
+    }
+
+    return {
+      isPurchaseOrder: true,
+      companyName: (data.buyerCompanyName || "").trim(),
+      companyAddress: (data.buyerBillingAddress || "").trim(),
+      poNo: (data.poNumber || "PO-" + Math.floor(1000 + Math.random() * 9000)).trim(),
+      poDate: (data.poDate || "").trim(),
+      items: itemsArray.map(it => {
+        function cleanNumberString(val) {
+          if (val === undefined || val === null) return "0";
+          let str = String(val).trim().replace(/[₹RsINR$\s/A-Za-z]/g, '');
+
+          if (str.includes(',') && str.includes('.')) {
+            if (str.lastIndexOf('.') > str.lastIndexOf(',')) {
+              str = str.replace(/,/g, '');
             } else {
-              continue;
+              str = str.replace(/\./g, '').replace(',', '.');
+            }
+          } else if (str.includes(',')) {
+            const commaParts = str.split(',');
+            if (commaParts.length === 2 && commaParts[1].length === 2) {
+              str = commaParts[0] + '.' + commaParts[1];
+            } else {
+              str = str.replace(/,/g, '');
             }
           }
-
-          const itemsArray = Array.isArray(data.items) ? data.items : [];
-          if (data.isPurchaseOrder === false && itemsArray.length === 0) {
-            return { isPurchaseOrder: false };
-          }
-
-          return {
-            isPurchaseOrder: true,
-            companyName: (data.buyerCompanyName || "").trim(),
-            companyAddress: (data.buyerBillingAddress || "").trim(),
-            poNo: (data.poNumber || "PO-" + Math.floor(1000 + Math.random() * 9000)).trim(),
-            poDate: (data.poDate || "").trim(),
-            items: itemsArray.map(it => {
-              function cleanNumberString(val) {
-                if (val === undefined || val === null) return "0";
-                let str = String(val).trim().replace(/[₹RsINR$\s/A-Za-z]/g, '');
-
-                if (str.includes(',') && str.includes('.')) {
-                  if (str.lastIndexOf('.') > str.lastIndexOf(',')) {
-                    str = str.replace(/,/g, '');
-                  } else {
-                    str = str.replace(/\./g, '').replace(',', '.');
-                  }
-                } else if (str.includes(',')) {
-                  const commaParts = str.split(',');
-                  if (commaParts.length === 2 && commaParts[1].length === 2) {
-                    str = commaParts[0] + '.' + commaParts[1];
-                  } else {
-                    str = str.replace(/,/g, '');
-                  }
-                }
-                str = str.replace(/[^0-9.]/g, '');
-                return str || "0";
-              }
-
-              let q = parseFloat(cleanNumberString(it.qty)) || 1;
-              let r = parseFloat(cleanNumberString(it.rate)) || 0;
-              let dp = parseFloat(cleanNumberString(it.discountPercent)) || 0;
-              let da = parseFloat(cleanNumberString(it.discountAmount)) || 0;
-              let a = parseFloat(cleanNumberString(it.amount)) || 0;
-
-              if (q <= 0) q = 1;
-              if (r === 0 && a > 0) r = a / q;
-              if (a === 0 && r > 0) a = (q * r) - da;
-
-              return {
-                partNo: (it.partNo || "").trim(),
-                desc: (it.desc || "Item Description").trim(),
-                qty: q.toString(),
-                unit: (it.unit || "NOS").trim().toUpperCase(),
-                rate: r.toFixed(2),
-                discountPercent: dp > 0 ? dp.toString() : "0",
-                discountAmount: da > 0 ? da.toFixed(2) : "0.00",
-                amount: a.toFixed(2)
-              };
-            })
-          };
+          str = str.replace(/[^0-9.]/g, '');
+          return str || "0";
         }
 
-        const errData = await response.json().catch(() => ({}));
-        const errMsg = errData.error?.message || `HTTP ${response.status}`;
+        let q = parseFloat(cleanNumberString(it.qty)) || 1;
+        let r = parseFloat(cleanNumberString(it.rate)) || 0;
+        let dp = parseFloat(cleanNumberString(it.discountPercent)) || 0;
+        let da = parseFloat(cleanNumberString(it.discountAmount)) || 0;
+        let a = parseFloat(cleanNumberString(it.amount)) || 0;
 
-        if (response.status === 401) {
-          throw new Error("Invalid OpenAI API Key! Please verify your API key.");
-        }
+        if (q <= 0) q = 1;
+        if (r === 0 && a > 0) r = a / q;
+        if (a === 0 && r > 0) a = (q * r) - da;
 
-        if (response.status === 429) {
-          await countdownWait(5, "OpenAI rate limit hit");
-          continue;
-        }
-
-        lastError = errMsg;
-      } catch (netErr) {
-        lastError = netErr.message;
-      }
-    }
-    throw new Error(lastError || "OpenAI extraction failed.");
+        return {
+          partNo: (it.partNo || "").trim(),
+          desc: (it.desc || "Item Description").trim(),
+          qty: q.toString(),
+          unit: (it.unit || "NOS").trim().toUpperCase(),
+          rate: r.toFixed(2),
+          discountPercent: dp > 0 ? dp.toString() : "0",
+          discountAmount: da > 0 ? da.toFixed(2) : "0.00",
+          amount: a.toFixed(2)
+        };
+      })
+    };
   }
 
   function addRowToTable(data = {}) {
