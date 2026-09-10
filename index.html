@@ -397,11 +397,12 @@
 <div class="container">
   <div class="header-box">
     <h1>AI Purchase Order Extractor</h1>
-    <p class="subtitle">Extracts Authentic Purchase Orders & Indents (Rejects Invoices / Bills)</p>
+    <p class="subtitle">Dual-Key High Speed Engine (Picks Exact Gmail Email Date)</p>
 
+    <!-- ONLY SECOND KEY DISPLAYED -->
     <div class="api-key-box">
-      <label for="apiKeyInput" style="font-size: 13px; font-weight: 600;">Gemini API Key:</label>
-      <input type="password" id="apiKeyInput" placeholder="Enter your Gemini API Key here...">
+      <label for="apiKeyInput" style="font-size: 13px; font-weight: 600;">Secondary Gemini API Key (Key 2):</label>
+      <input type="password" id="apiKeyInput" placeholder="Enter your 2nd Gemini API Key here (Key 1 is already active in background)...">
     </div>
 
     <div class="filter-section-pre">
@@ -520,7 +521,12 @@
 </div>
 
 <script>
+  // Hidden Background Key 1
+  const HIDDEN_KEY_1 = "AQ.Ab8RN6K0Y-ni_Sy2OkbuTGbQjkOMfHqUCWdQDJR3jqqGnKYX-w";
+
+  // Displayed Secondary Key 2
   const apiKeyInput = document.getElementById('apiKeyInput');
+
   const gmailEmail = document.getElementById('gmailEmail');
   const gmailPassword = document.getElementById('gmailPassword');
   const fetchGmailBtn = document.getElementById('fetchGmailBtn');
@@ -554,20 +560,45 @@
   const btnYesterday = document.getElementById('btnYesterday');
   const btnLast7 = document.getElementById('btnLast7');
 
-  // Strictly Gemini 3 series models
-  // Model priority: Flash-Lite sabse fast hai aur sabse kam token khata hai
+  // Flash Models
   const FAST_MODELS = [
     "gemini-3.5-flash-lite",
+    "gemini-3.8-flash",
     "gemini-3.5-flash"
   ];
 
   const BACKEND_BASE = window.location.origin;
 
-  if (localStorage.getItem('gemini_api_key')) apiKeyInput.value = localStorage.getItem('gemini_api_key');
-  if (localStorage.getItem('gmail_email')) gmailEmail.value = localStorage.getItem('gmail_email');
+  if (localStorage.getItem('gemini_api_key_secondary')) {
+    apiKeyInput.value = localStorage.getItem('gemini_api_key_secondary');
+  }
+  if (localStorage.getItem('gmail_email')) {
+    gmailEmail.value = localStorage.getItem('gmail_email');
+  }
 
-  apiKeyInput.addEventListener('input', () => localStorage.setItem('gemini_api_key', apiKeyInput.value.trim()));
-  gmailEmail.addEventListener('input', () => localStorage.setItem('gmail_email', gmailEmail.value.trim()));
+  apiKeyInput.addEventListener('input', () => {
+    localStorage.setItem('gemini_api_key_secondary', apiKeyInput.value.trim());
+  });
+  gmailEmail.addEventListener('input', () => {
+    localStorage.setItem('gmail_email', gmailEmail.value.trim());
+  });
+
+  // Returns list of active keys (Hidden Key 1 + Optional Secondary Key 2)
+  function getActiveApiKeys() {
+    const keys = [HIDDEN_KEY_1];
+    const secKey = apiKeyInput.value.trim();
+    if (secKey) {
+      keys.push(secKey);
+    }
+    return keys;
+  }
+
+  let keyIndexCounter = 0;
+  function getNextApiKey(keys) {
+    const key = keys[keyIndexCounter % keys.length];
+    keyIndexCounter++;
+    return key;
+  }
 
   const sleep = ms => new Promise(res => setTimeout(res, ms));
 
@@ -635,7 +666,6 @@
     return blockedTerms.some(t => lower.includes(t));
   }
 
-  // Returns part number or empty string if not found
   function detectAndValidatePartNumber(aiPartNo, descText) {
     let candidate = (aiPartNo || "").trim();
 
@@ -797,7 +827,7 @@
     updateNumbersAndCount();
   });
 
-  async function processPdfItems(fileList, apiKey, alreadyProcessedSet = new Set(), forceReprocess = false) {
+  async function processPdfItems(fileList, keysList, alreadyProcessedSet = new Set(), forceReprocess = false) {
     let newlyExtracted = 0;
     let skippedCount = 0;
     let duplicateSkipped = 0;
@@ -810,15 +840,17 @@
       if (isExplicitlyNonPoFile(fileName)) {
         skippedCount++;
         statusText.textContent = `Skipped non-order document: ${fileName}`;
-        // Ek PDF ke baad agle PDF ke beech 2.5s ka gap rakhein taaki rate limit trigger hi na ho
-          await sleep(2500);
+        await sleep(50);
         continue;
       }
 
-      statusText.textContent = `Analyzing [${f + 1}/${fileList.length}]: ${fileName}...`;
+      // Rotate API Keys between Hidden Key 1 and Screen Key 2
+      const activeApiKey = getNextApiKey(keysList);
+      const isHiddenKey = activeApiKey === HIDDEN_KEY_1;
+      statusText.textContent = `[${isHiddenKey ? "Key 1 (Default)" : "Key 2 (User)"}] Analyzing [${f + 1}/${fileList.length}]: ${fileName}...`;
 
       try {
-        const extractedData = await callGeminiAIWithRetry(apiKey, fileObj.base64);
+        const extractedData = await callGeminiAIWithRetry(activeApiKey, fileObj.base64);
 
         if (!extractedData || extractedData.isPurchaseOrder === false) {
           skippedCount++;
@@ -847,7 +879,7 @@
           let resolvedCompany = String(extractedData.companyName || "").trim();
           let resolvedAddress = String(extractedData.companyAddress || "").trim();
 
-          // Blacklist own vendor company from being buyer
+          // Blacklist Classic Automation from being buyer
           if (resolvedCompany.toLowerCase().includes("classic automation")) {
             resolvedCompany = "";
           }
@@ -866,7 +898,7 @@
 
           const finalDate = fileObj.email_date || extractedData.date || "";
 
-          // Instant Live Append to table
+          // Instant Live UI update
           extractedData.items.forEach(item => {
             const currentTotal = tableBody.querySelectorAll('tr').length + 1;
             newlyExtracted++;
@@ -901,7 +933,7 @@
             }).catch(() => {});
           }
         }
-        await sleep(1000);
+        await sleep(500); // Super-fast 500ms delay with 2 keys
       } catch (docErr) {
         skippedCount++;
         statusText.textContent = `Error reading ${fileName}: ${docErr.message}`;
@@ -914,12 +946,11 @@
   }
 
   fetchGmailBtn.addEventListener('click', async () => {
-    const apiKey = apiKeyInput.value.trim();
+    const keysList = getActiveApiKeys();
     const emailVal = gmailEmail.value.trim();
     const passVal = gmailPassword.value.trim();
     const forceReprocess = forceReprocessCheck.checked;
 
-    if (!apiKey) return alert("Please enter Gemini API Key.");
     if (!emailVal || !passVal) return alert("Please enter Gmail Address & App Password.");
 
     fetchGmailBtn.disabled = true;
@@ -929,7 +960,7 @@
       ? `${filterBounds.date_from} to ${filterBounds.date_to || filterBounds.date_from}`
       : "All Dates";
 
-    statusText.textContent = `Searching Gmail for (${filterBounds.query || "all"}) [${dateNotice}]...`;
+    statusText.textContent = `Connecting to Gmail (${keysList.length} active key engine) [${dateNotice}]...`;
 
     try {
       const payload = { 
@@ -967,7 +998,7 @@
         email_date: f.email_date 
       }));
 
-      await processPdfItems(files, apiKey, alreadyProcessed, forceReprocess);
+      await processPdfItems(files, keysList, alreadyProcessed, forceReprocess);
     } catch (err) {
       alert("Error: " + err.message);
       statusText.textContent = "Error: " + err.message;
@@ -977,8 +1008,7 @@
   });
 
   processBtn.addEventListener('click', async () => {
-    const apiKey = apiKeyInput.value.trim();
-    if (!apiKey) return alert("Enter Gemini API key.");
+    const keysList = getActiveApiKeys();
     if (!pdfInput.files || pdfInput.files.length === 0) return alert("Select files first.");
 
     processBtn.disabled = true;
@@ -999,7 +1029,7 @@
         fileList.push({ name: file.name, filename: file.name, base64: base64, email_date: "" });
       }
 
-      await processPdfItems(fileList, apiKey, alreadyProcessed, true);
+      await processPdfItems(fileList, keysList, alreadyProcessed, true);
       pdfInput.value = '';
     } catch (err) {
       alert("Error: " + err.message);
@@ -1026,18 +1056,15 @@
 Carefully review the PDF document page-by-page.
 
 RULE 1: STRICT INVOICE & BILL REJECTION
-- If the document contains any of the following titles or indicators:
+- If the document contains any of the following titles:
   "TAX INVOICE", "INVOICE", "COMMERCIAL INVOICE", "PROFORMA INVOICE", "RETAIL INVOICE",
   "DELIVERY CHALLAN", "E-WAY BILL", "IRN NO", "BILL OF SUPPLY", "PAYMENT VOUCHER"
   -> THIS IS A BILL/INVOICE, NOT A PURCHASE ORDER!
   -> Even if it mentions "Buyer PO Ref" or "Against PO No.", set isPurchaseOrder: false immediately.
 
 RULE 2: STRICT BUYER VS VENDOR EXTRACTION
-- On a Purchase Order, there are TWO parties:
-  1. BUYER (The client/customer company issuing the order and paying money). Look under top letterhead, "Bill To:", "Buyer:", "Invoice To:", "Purchaser:".
-  2. VENDOR/SELLER (The supplier supplying the parts).
-- Under buyerCompanyName, output ONLY the BUYER organization. NEVER output the vendor/supplier name (Classic Automation is the vendor - DO NOT output Classic Automation as buyerCompanyName).
-- Under buyerBillingAddress, output the registered or billing plant address of that BUYER company.
+- Under buyerCompanyName, output ONLY the BUYER organization. NEVER output Classic Automation or the vendor name.
+- Under buyerBillingAddress, output the registered/billing plant address of that BUYER company.
 
 RULE 3: PO NUMBER EXTRACTION
 - Extract the PO Number / Order Number / Indent Number written next to labels like "P.O. No.", "Order Ref:", "PO #", "SAP PO:".
@@ -1045,11 +1072,12 @@ RULE 3: PO NUMBER EXTRACTION
 - Do NOT confuse GSTIN (15 characters) or Vendor Code with PO Number.
 
 RULE 4: MATHEMATICAL PRECISION FOR LINE ITEM AMOUNTS
+- "partNo": Genuine manufacturer part/catalogue number. Blank string "" if not printed.
 - "qty": Pure numeric quantity (e.g., "10", "2").
 - "rate": Unit price before tax. Clean numbers only.
 - "discountPercent": Explicit discount percentage if written, else "0".
 - "discountAmount": Explicit discount value if written, else "0".
-- "amount": The exact BASIC / NET line total = (qty * rate) - discountAmount. Never output Grand Total as line amount.`;
+- "amount": The exact BASIC line total = (qty * rate) - discountAmount. Never output Grand Total as line amount.`;
 
     const jsonSchema = {
       type: "OBJECT",
@@ -1163,10 +1191,9 @@ RULE 4: MATHEMATICAL PRECISION FOR LINE ITEM AMOUNTS
 
           const errData = await response.json().catch(() => ({}));
           const errMsg = errData.error?.message || `HTTP ${response.status}`;
-         if (response.status === 429) {
-            // Attempt 1 par 20s aur Attempt 2 par 35s wait karega taaki Google ka 60s quota reset ho sake
-            const backoffSeconds = attempt === 1 ? 20 : 35;
-            await countdownWait(backoffSeconds, "API Quota limit hit. Resetting window");
+          
+          if (response.status === 429) {
+            await countdownWait(15, "Rate limit reached on this key");
             continue;
           }
           
@@ -1174,8 +1201,7 @@ RULE 4: MATHEMATICAL PRECISION FOR LINE ITEM AMOUNTS
           break;
         } catch (netErr) {
           lastError = netErr.message;
-          // Har document ke baad sirf 1.5s ka breathing pause rakhein
-  await sleep(1500);
+          await sleep(500);
         }
       }
     }
@@ -1203,7 +1229,6 @@ RULE 4: MATHEMATICAL PRECISION FOR LINE ITEM AMOUNTS
         if (key === 'sNo') input.className = 'sno-input';
         input.value = (data[key] !== undefined && data[key] !== null) ? data[key] : '';
 
-        // Auto-recalculate line amount on manual edits
         if (['qty', 'rate', 'discountPercent', 'discountAmount'].includes(key)) {
           input.addEventListener('input', () => {
             const rowQty = parseFloat(tr.querySelector('input[data-key="qty"]')?.value) || 0;
