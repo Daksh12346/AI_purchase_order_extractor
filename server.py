@@ -26,7 +26,7 @@ app.add_middleware(
 )
 
 PROCESSED_FILE = "processed_po.json"
-MAX_FILE_SIZE_MB = 30  # Allow large multi-page PO PDFs up to 30MB
+MAX_FILE_SIZE_MB = 30
 
 
 def get_processed_pos() -> Set[str]:
@@ -85,7 +85,7 @@ def sync_fetch_po_pdfs(req: GmailFetchRequest) -> dict:
 
     if not user_email or not app_password:
         raise HTTPException(
-            status_code=400, detail="Gmail address and 16-character App Password are required."
+            status_code=400, detail="Gmail address and App Password are required."
         )
 
     mail = None
@@ -118,22 +118,21 @@ def sync_fetch_po_pdfs(req: GmailFetchRequest) -> dict:
         full_raw_query = " ".join(gmail_query_parts)
         status, message_numbers = mail.uid("search", None, 'X-GM-RAW', f'"{full_raw_query}"')
 
-        if status != "OK" or not message_numbers[0]:
+        if status != "OK" or not message_numbers or not message_numbers[0]:
             return {"files": [], "message": "No emails found matching criteria."}
 
         email_uids = message_numbers[0].split()
-        # FETCH ALL - NO TRUNCATION / NO BATCH SLICING
         email_uids.reverse()
 
         extracted_files = []
 
         for uid in email_uids:
             res, msg_data = mail.uid("fetch", uid, "(RFC822)")
-            if res != "OK":
+            if res != "OK" or not msg_data:
                 continue
 
             for response_part in msg_data:
-                if not isinstance(response_part, tuple):
+                if not isinstance(response_part, tuple) or len(response_part) < 2:
                     continue
 
                 msg = email.message_from_bytes(response_part[1])
@@ -148,13 +147,14 @@ def sync_fetch_po_pdfs(req: GmailFetchRequest) -> dict:
                         email_date_str = ""
 
                 for part in msg.walk():
-                    if (
-                        part.get_content_maintype() == "multipart"
-                        or part.get("Content-Disposition") is None
-                    ):
+                    if part.get_content_maintype() == "multipart":
                         continue
 
                     filename = part.get_filename()
+                    if not filename:
+                        # Fallback check for filename inside Content-Type header
+                        filename = part.get_param("name")
+
                     if not filename:
                         continue
 
@@ -185,6 +185,10 @@ def sync_fetch_po_pdfs(req: GmailFetchRequest) -> dict:
         raise HTTPException(status_code=500, detail=f"Error reading Gmail: {str(e)}")
     finally:
         if mail:
+            try:
+                mail.close()
+            except Exception:
+                pass
             try:
                 mail.logout()
             except Exception:
@@ -230,4 +234,4 @@ async def fetch_po_pdfs(req: GmailFetchRequest):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5050))
-    uvicorn.run("server:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run(app, host="0.0.0.0", port=port, reload=False)
