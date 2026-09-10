@@ -418,7 +418,7 @@
 <div class="container">
   <div class="header-box">
     <h1>AI Purchase Order Extractor</h1>
-    <p class="subtitle">Dual-Key Parallel Speed Engine (Picks Exact Gmail Email Date)</p>
+    <p class="subtitle">Dual-Key Parallel Speed Engine (Separate PDF PO Date & DD/MM/YY Gmail Date)</p>
 
     <!-- 2 USER-INPUT API KEY BOXES -->
     <div class="api-key-container">
@@ -519,7 +519,8 @@
             <th data-key="company" style="min-width: 210px;">Company Name</th>
             <th data-key="address" style="min-width: 220px;">Company Address</th>
             <th data-key="poNo" style="min-width: 150px;">PO / Order No</th>
-            <th data-key="date" style="min-width: 110px;">Gmail Date</th>
+            <th data-key="poDate" style="min-width: 120px;">PO Date (Doc)</th>
+            <th data-key="gmailDate" style="min-width: 110px;">Gmail Date (DD/MM/YY)</th>
             <th data-key="partNo" style="min-width: 160px;">Part Number</th>
             <th data-key="desc" style="min-width: 300px;">Description</th>
             <th data-key="qty" style="min-width: 70px;">Qty</th>
@@ -592,7 +593,6 @@
 
   const BACKEND_BASE = window.location.origin;
 
-  // Pre-load saved keys from localStorage
   if (localStorage.getItem('gemini_api_key_custom_1')) {
     apiKeyInput1.value = localStorage.getItem('gemini_api_key_custom_1');
   } else if (localStorage.getItem('gemini_api_key')) {
@@ -639,6 +639,26 @@
     const month = String(d.getMonth() + 1).padStart(2, '0');
     const day = String(d.getDate()).padStart(2, '0');
     return `${year}-${month}-${day}`;
+  }
+
+  // Format Gmail Date specifically to DD/MM/YY
+  function formatGmailDateToDDMMYY(isoDateStr) {
+    if (!isoDateStr) return "";
+    const parts = String(isoDateStr).trim().split('-');
+    if (parts.length === 3) {
+      const year = parts[0].slice(-2);
+      const month = parts[1].padStart(2, '0');
+      const day = parts[2].padStart(2, '0');
+      return `${day}/${month}/${year}`;
+    }
+    const d = new Date(isoDateStr);
+    if (!isNaN(d.getTime())) {
+      const day = String(d.getDate()).padStart(2, '0');
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const year = String(d.getFullYear()).slice(-2);
+      return `${day}/${month}/${year}`;
+    }
+    return isoDateStr;
   }
 
   btnToday.addEventListener('click', () => {
@@ -698,34 +718,34 @@
     return blockedTerms.some(t => lower.includes(t));
   }
 
-  function detectAndValidatePartNumber(aiPartNo) {
-    if (!aiPartNo || typeof aiPartNo !== 'string') return "";
-    let candidate = aiPartNo.trim();
+  // STRICT PART NUMBER DETECTOR
+  function detectAndValidatePartNumber(aiPartNo, descText) {
+    let candidate = (aiPartNo || "").trim();
 
-    if (!candidate) return "";
+    function isValidIndustrialCode(code) {
+      if (!code || typeof code !== 'string') return false;
+      let c = code.trim();
+      if (/^(NA|N\/A|NIL|NONE|NULL|-|_|\.|\/)$/i.test(c)) return false;
+      if (/^(SCHNEIDER|SIEMENS|L&T|ABB|HAVELLS|LEGRAND|NOS|SET|PCS|EA|MTR|KG|LOT|NO|PKT|PAIR)$/i.test(c)) return false;
+      if (/^(ITEM\b|ITM\b|MAT\b|IND\b|CODE\b|SR\b|SL\b|S\.NO|POS\b|LINE\b)/i.test(c)) return false;
+      if (/^(\d+P|\d+A|\d+V|\d+KW|\d+HP|\d+K|\d+-WAY|\d+MM|\d+X\d+|\d+SQMM)$/i.test(c)) return false;
+      if (/^\d{6,8}$/.test(c)) return false;
+      return /^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9\-\/]{4,25}$/.test(c);
+    }
 
-    // Common junk words, symbols, and null states reject karein
-    if (/^(NA|N\/A|NIL|NONE|NULL|-|_|\.|\/)$/i.test(candidate)) return "";
-
-    // Unit names and brand words reject karein
-    if (/^(SCHNEIDER|SIEMENS|L&T|ABB|HAVELLS|LEGRAND|NOS|SET|PCS|EA|MTR|KG|LOT|NO|PKT|PAIR)$/i.test(candidate)) return "";
-
-    // Internal item codes, serials, descriptions reject karein
-    if (/^(ITEM\b|ITM\b|MAT\b|IND\b|CODE\b|SR\b|SL\b|S\.NO|POS\b|LINE\b)/i.test(candidate)) return "";
-
-    // Electrical ratings / dimensions reject karein
-    if (/^(\d+P|\d+A|\d+V|\d+KW|\d+HP|\d+K|\d+-WAY|\d+MM|\d+X\d+|\d+SQMM)$/i.test(candidate)) return "";
-
-    // Pure 6-digit or 8-digit numbers HSN/SAC codes hote hain
-    if (/^\d{6,8}$/.test(candidate)) return "";
-
-    // Genuine industrial part number must contain letters and numbers
-    const isAuthenticPartNo = /^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9\-\/]{4,25}$/;
-
-    if (isAuthenticPartNo.test(candidate)) {
+    if (candidate && isValidIndustrialCode(candidate)) {
       return candidate;
     }
 
+    if (descText && typeof descText === 'string') {
+      const words = descText.split(/[\s,;()]+/);
+      for (let word of words) {
+        let cleanWord = word.trim().replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, '');
+        if (isValidIndustrialCode(cleanWord)) {
+          return cleanWord;
+        }
+      }
+    }
     return "";
   }
 
@@ -735,6 +755,11 @@
     if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(clean)) {
       const parts = clean.split('-');
       return new Date(parts[0], parts[1] - 1, parts[2]);
+    }
+    if (/^\d{1,2}-\d{1,2}-\d{2}$/.test(clean)) {
+      const parts = clean.split('-');
+      const y = 2000 + parseInt(parts[2], 10);
+      return new Date(y, parts[1] - 1, parts[0]);
     }
     if (/^\d{1,2}-\d{1,2}-\d{4}$/.test(clean)) {
       const parts = clean.split('-');
@@ -809,7 +834,8 @@
 
     allRows.forEach(tr => {
       const poVal = tr.querySelector('input[data-key="poNo"]')?.value || '';
-      const dateVal = tr.querySelector('input[data-key="date"]')?.value || '';
+      const gDateVal = tr.querySelector('input[data-key="gmailDate"]')?.value || '';
+      const poDateVal = tr.querySelector('input[data-key="poDate"]')?.value || '';
       const compVal = tr.querySelector('input[data-key="company"]')?.value || '';
       const partVal = tr.querySelector('input[data-key="partNo"]')?.value || '';
       const descVal = tr.querySelector('input[data-key="desc"]')?.value || '';
@@ -818,11 +844,11 @@
       let visible = true;
 
       if (searchTerm) {
-        const fullRowText = `${poVal} ${compVal} ${partVal} ${descVal}`.toLowerCase();
+        const fullRowText = `${poVal} ${compVal} ${partVal} ${descVal} ${poDateVal}`.toLowerCase();
         if (!fullRowText.includes(searchTerm)) visible = false;
       }
 
-      const parsedDate = parseFlexibleDate(dateVal);
+      const parsedDate = parseFlexibleDate(gDateVal) || parseFlexibleDate(poDateVal);
       if (fromDate && parsedDate && parsedDate < fromDate) visible = false;
       if (toDate && parsedDate && parsedDate > toDate) visible = false;
 
@@ -926,21 +952,24 @@
             displayedPOs.add(extractedPoNo);
           }
 
-          const finalDate = fileObj.email_date || extractedData.date || "";
+          // Strict separate dates: Gmail Date in DD/MM/YY format & Document Date as original text
+          const formattedGmailDate = formatGmailDateToDDMMYY(fileObj.email_date);
+          const rawDocPoDate = extractedData.poDate || "";
 
           // Instant Live UI update
           extractedData.items.forEach(item => {
             const currentTotal = tableBody.querySelectorAll('tr').length + 1;
             newlyExtracted++;
 
-            const finalPartNo = detectAndValidatePartNumber(item.partNo);
+            const finalPartNo = detectAndValidatePartNumber(item.partNo, item.desc);
 
             addRowToTable({
               sNo: currentTotal,
               company: resolvedCompany,
               address: resolvedAddress || "Not Specified",
               poNo: extractedData.poNo || "N/A",
-              date: finalDate,
+              poDate: rawDocPoDate,
+              gmailDate: formattedGmailDate,
               partNo: finalPartNo,
               desc: item.desc || "",
               qty: item.qty || "1",
@@ -1086,7 +1115,7 @@
     let lastError = null;
 
     const systemInstruction = `You are a forensic industrial procurement auditor inspecting Purchase Order documents.
-Your primary directive is ZERO-ERROR extraction of financial columns: QUANTITY, UNIT RATE, and LINE AMOUNT.
+Your primary directive is ZERO-ERROR extraction of financial columns: QUANTITY, UNIT RATE, LINE AMOUNT, and PO DATE.
 
 ════════════════════════════════════════════════════════════════════
 RULE 1: STRICT INVOICE & BILL REJECTION
@@ -1101,29 +1130,27 @@ RULE 2: BUYER vs VENDOR DISTINCTION
 - Supplier/Vendor: The entity fulfilling the order. NEVER output Classic Automation as the buyer.
 
 ════════════════════════════════════════════════════════════════════
-RULE 3: PRECISE TABLE COLUMN ANCHORING (QUANTITY vs RATE vs AMOUNT)
+RULE 3: PO DATE (PDF DOCUMENT DATE)
 ════════════════════════════════════════════════════════════════════
-Inspect the table structure vertically under the header labels:
+- Under poDate, extract the EXACT date printed on the Purchase Order document next to labels like "PO Date:", "Order Date:", "Date:".
+- Output the date EXACTLY AS PRINTED in the PDF without converting or reformatting (e.g., if printed as "15.08.2026" or "10-Aug-2026", keep it as is).
 
-1. QUANTITY ("qty"):
-   - Column labels: "Qty", "Quantity", "PO Qty", "Order Qty".
-   - Extract strictly the numeric value (e.g., "10", "2.5", "100").
-   - NEVER include unit descriptions here (strip "NOS", "SET", "MTR").
+════════════════════════════════════════════════════════════════════
+RULE 4: PART NUMBER LOCATION CONSTRAINT
+════════════════════════════════════════════════════════════════════
+The manufacturer Part Number / Catalog Number / Model Number exists ONLY in two possible places:
+1. Under a dedicated table column named: "Part No", "Catalog No", "Cat No", "Model No", "Item Code".
+2. OR embedded directly inside the "Item Description" text of that specific item line.
+- If neither contains an authentic manufacturer part code, RETURN STRICTLY AN EMPTY STRING "".
+- NEVER extract HSN codes or internal serial numbers.
 
-2. UNIT RATE ("rate"):
-   - Column labels: "Unit Rate", "Rate", "Basic Price", "Unit Price", "Price/Unit".
-   - This is strictly the PRICE OF A SINGLE UNIT before tax/discount.
-   - FATAL ERROR WARNING: DO NOT copy the Line Amount / Net Total into the Rate!
-   - Example: If Qty is 10 and Net Total is 50,000, the Rate is 5000 (NOT 50,000).
-   - Strip all currency markers ("₹", "Rs.", "INR", "$") and commas. Pure number only (e.g. "5000.00").
-
-3. DISCOUNT ("discountPercent", "discountAmount"):
-   - If a line-item discount is explicitly printed, extract it. Otherwise return "0".
-
-4. LINE AMOUNT ("amount"):
-   - Column labels: "Amount", "Basic Amount", "Taxable Value", "Net Amount", "Total (INR)".
-   - Mathematical formula: amount = (qty * rate) - discountAmount.
-   - NEVER output the PO Grand Total / Final Invoice Value as the line amount.`;
+════════════════════════════════════════════════════════════════════
+RULE 5: PRECISE TABLE COLUMN ANCHORING (QUANTITY vs RATE vs AMOUNT)
+════════════════════════════════════════════════════════════════════
+1. QUANTITY ("qty"): Numeric value only (e.g., "10", "2.5"). Strip "NOS", "SET".
+2. UNIT RATE ("rate"): Price of a single unit before tax. Clean number only. Never copy Line Amount or Grand Total here.
+3. DISCOUNT ("discountPercent", "discountAmount"): Explicit line discount if printed, else "0".
+4. LINE AMOUNT ("amount"): Basic taxable line total = (qty * rate) - discountAmount. Never Grand Total.`;
 
     const jsonSchema = {
       type: "OBJECT",
@@ -1133,13 +1160,13 @@ Inspect the table structure vertically under the header labels:
         buyerCompanyName: { type: "STRING" },
         buyerBillingAddress: { type: "STRING" },
         poNumber: { type: "STRING" },
-        poDate: { type: "STRING" },
+        poDate: { type: "STRING", description: "Exact date of the PO as printed on the PDF document." },
         items: {
           type: "ARRAY",
           items: {
             type: "OBJECT",
             properties: {
-              partNo: { type: "STRING", description: "Manufacturer catalog/model number only. Strictly empty string \"\" if not explicitly printed." },
+              partNo: { type: "STRING", description: "Manufacturer catalog/model number from the dedicated column or within the description. Strictly empty string \"\" if not present." },
               desc: { type: "STRING", description: "Complete item description." },
               qty: { type: "STRING", description: "Numeric quantity only, no unit strings." },
               unit: { type: "STRING", description: "Unit of measurement (e.g., NOS, SET, MTR, EA)." },
@@ -1152,7 +1179,7 @@ Inspect the table structure vertically under the header labels:
           }
         }
       },
-      required: ["isPurchaseOrder", "buyerCompanyName", "poNumber", "items"]
+      required: ["isPurchaseOrder", "buyerCompanyName", "poNumber", "poDate", "items"]
     };
 
     for (let key of candidateKeys) {
@@ -1197,9 +1224,8 @@ Inspect the table structure vertically under the header labels:
               companyName: (data.buyerCompanyName || "").trim(),
               companyAddress: (data.buyerBillingAddress || "").trim(),
               poNo: (data.poNumber || "").trim(),
-              date: (data.poDate || "").trim(),
+              poDate: (data.poDate || "").trim(),
               items: (data.items || []).map(it => {
-                // 1. Raw string cleanup (Commas, currency signs, spaces remove)
                 let rawQty = String(it.qty || "1").replace(/[^0-9.]/g, '') || "1";
                 let rawRate = String(it.rate || "0").replace(/[^0-9.]/g, '') || "0";
                 let rawDiscPct = String(it.discountPercent || "0").replace(/[^0-9.]/g, '') || "0";
@@ -1212,25 +1238,20 @@ Inspect the table structure vertically under the header labels:
                 let da = parseFloat(rawDiscAmt) || 0;
                 let a = parseFloat(rawAmt) || 0;
 
-                // 2. Quantity Sanity Check (Quantity cannot be 0)
                 if (q <= 0) q = 1;
 
-                // 3. Discount calculation
                 if (dp > 0 && da === 0 && r > 0) {
                   da = (q * r * dp) / 100;
                 }
 
-                // 4. CROSS-CHECK 1: Column Swap Check (Rate me Line Total ghus gaya ho)
                 if (q > 1 && a > 0 && Math.abs(r - a) < 0.05) {
                   r = a / q;
                 }
 
-                // 5. CROSS-CHECK 2: Missing Rate recovery
                 if (r === 0 && a > 0 && q > 0) {
                   r = (a + da) / q;
                 }
 
-                // 6. CROSS-CHECK 3: Mathematical Reconciliation
                 const expectedAmt = (q * r) - da;
 
                 if (a === 0 && r > 0) {
@@ -1258,7 +1279,6 @@ Inspect the table structure vertically under the header labels:
           const errData = await response.json().catch(() => ({}));
           const errMsg = errData.error?.message || `HTTP ${response.status}`;
 
-          // Rate limit 429 handling with key failover
           if (response.status === 429) {
             if (candidateKeys.length > 1 && key === candidateKeys[0]) {
               statusText.textContent = `⚡ Key 1 rate limit reached. Auto-switching to Key 2 immediately...`;
