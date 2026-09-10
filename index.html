@@ -584,11 +584,11 @@
   const btnYesterday = document.getElementById('btnYesterday');
   const btnLast7 = document.getElementById('btnLast7');
 
- // Official Gemini API Models (Gemini 3.8 & 3.5 Series)
+  // Ultra-fast prioritized models
   const FAST_MODELS = [
-    "gemini-3.8-flash",
-    "gemini-3.5-flash",
-    "gemini-3.5-flash-lite"
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-3.5-flash"
   ];
 
   const BACKEND_BASE = window.location.origin;
@@ -708,7 +708,6 @@
     }
   }
 
-  // Pre-filter: Explicit non-PO filenames ko pehle hi drop karna
   function isExplicitlyNonPoFile(filename) {
     if (!filename || typeof filename !== 'string') return false;
     const lower = filename.toLowerCase();
@@ -719,7 +718,6 @@
     ];
     const poTerms = ['purchase order', 'purchase_order', 'po_', '_po', 'p.o.', 'work order', 'indent'];
     
-    // Agar filename me explicitly PO likha hai toh block na karein
     if (poTerms.some(t => lower.includes(t))) return false;
     return blockedTerms.some(t => lower.includes(t));
   }
@@ -741,8 +739,8 @@
       if (/^MAT[0-9_-]+/i.test(s)) return true;
       if (/^11[0-9]{5,}/.test(s)) return true;
       if (/^(\d+P|\d+A|\d+V|\d+KW|\d+HP|\d+K|\d+-WAY|\d+MM|\d+X\d+|\d+SQMM|\d+VAC|\d+VDC|\d+AMP|\d+POLE)$/i.test(s)) return true;
-      if (/^\d{6,8}$/.test(s)) return true; // HSN codes
-      if (/^\d{1,4}$/.test(s)) return true; // Serials
+      if (/^\d{6,8}$/.test(s)) return true;
+      if (/^\d{1,4}$/.test(s)) return true;
       return false;
     }
 
@@ -908,121 +906,140 @@
     updateNumbersAndCount();
   });
 
+  // Fast Batch Processing Pool (Concurrency = 3)
   async function processPdfItems(fileList, keysList, alreadyProcessedSet = new Set(), forceReprocess = false) {
     let newlyExtracted = 0;
     let skippedCount = 0;
     let duplicateSkipped = 0;
+    let processedTotal = 0;
 
     const tableExistingPOs = new Set();
     tableBody.querySelectorAll('tr').forEach(tr => {
       const p = tr.querySelector('input[data-key="poNo"]')?.value;
       if (p && p.trim()) tableExistingPOs.add(p.trim().toUpperCase());
     });
-for (let f = 0; f < fileList.length; f++) {
-  // Ek file upload hoti hai -> AI ko bhejte hain -> 5-10 second wait karte hain -> fir sleep karte hain -> fir next file!
-  await callGeminiAIWithRetry(...);
-  await sleep(500);
-}
 
-      const chosenApiKey = getNextApiKey(keysList);
-      const keyLabel = keysList.indexOf(chosenApiKey) + 1;
-      statusText.textContent = `[Key ${keyLabel}] Analyzing document content [${f + 1}/${fileList.length}]: ${fileName}...`;
+    const CONCURRENCY_LIMIT = 3;
+    let fileCursor = 0;
 
-      try {
-        const extractedData = await callGeminiAIWithRetry(chosenApiKey, keysList, fileObj.base64);
+    async function worker() {
+      while (fileCursor < fileList.length) {
+        const currentIndex = fileCursor++;
+        const fileObj = fileList[currentIndex];
+        const fileName = (fileObj && (fileObj.name || fileObj.filename)) ? (fileObj.name || fileObj.filename) : `Document_${currentIndex + 1}.pdf`;
 
-        // 2. Deep Content level check: If AI flags it as non-PO
-        if (!extractedData || extractedData.isPurchaseOrder === false) {
+        if (isExplicitlyNonPoFile(fileName)) {
           skippedCount++;
-          statusText.textContent = `[Ignored Non-PO Document]: ${fileName} (${extractedData?.documentType || 'Not a PO'})`;
-          await sleep(50);
+          processedTotal++;
+          statusText.textContent = `[${processedTotal}/${fileList.length}] Skipped non-PO filename: ${fileName}`;
           continue;
         }
 
-        const extractedPoNo = String(extractedData.poNo || "").trim().toUpperCase();
+        const chosenApiKey = getNextApiKey(keysList);
+        const keyLabel = keysList.indexOf(chosenApiKey) + 1;
+        statusText.textContent = `[${processedTotal + 1}/${fileList.length}] Analyzing [Key ${keyLabel}]: ${fileName}...`;
 
-        if (extractedPoNo && tableExistingPOs.has(extractedPoNo)) {
-          duplicateSkipped++;
-          statusText.textContent = `Already in table: ${extractedPoNo}`;
-          await sleep(50);
-          continue;
-        }
+        try {
+          const extractedData = await callGeminiAIWithRetry(chosenApiKey, keysList, fileObj.base64);
 
-        if (!forceReprocess && extractedPoNo && alreadyProcessedSet.has(extractedPoNo)) {
-          duplicateSkipped++;
-          statusText.textContent = `Previously saved PO: ${extractedPoNo}`;
-          await sleep(50);
-          continue;
-        }
-
-        if (extractedData && Array.isArray(extractedData.items) && extractedData.items.length > 0) {
-          let resolvedCompany = String(extractedData.companyName || "").trim();
-          let resolvedAddress = sanitizeBuyerAddress(extractedData.companyAddress);
-
-          if (resolvedCompany.toLowerCase().includes("classic automation")) {
-            resolvedCompany = "";
+          if (!extractedData || extractedData.isPurchaseOrder === false) {
+            skippedCount++;
+            processedTotal++;
+            statusText.textContent = `[${processedTotal}/${fileList.length}] Ignored Non-PO: ${fileName} (${extractedData?.documentType || 'Not a PO'})`;
+            continue;
           }
 
-          if ((!resolvedCompany || resolvedCompany.length < 3) && resolvedAddress.toLowerCase().includes("pantnagar")) {
-            resolvedCompany = "SWG INDUSTRIES LIMITED";
+          const extractedPoNo = String(extractedData.poNo || "").trim().toUpperCase();
+
+          if (extractedPoNo && tableExistingPOs.has(extractedPoNo)) {
+            duplicateSkipped++;
+            processedTotal++;
+            statusText.textContent = `[${processedTotal}/${fileList.length}] Already in table: ${extractedPoNo}`;
+            continue;
           }
 
-          if (!resolvedCompany || resolvedCompany.length < 2) {
-            resolvedCompany = "Buyer Organization";
+          if (!forceReprocess && extractedPoNo && alreadyProcessedSet.has(extractedPoNo)) {
+            duplicateSkipped++;
+            processedTotal++;
+            statusText.textContent = `[${processedTotal}/${fileList.length}] Previously saved: ${extractedPoNo}`;
+            continue;
           }
 
-          if (extractedPoNo) {
-            tableExistingPOs.add(extractedPoNo);
-          }
+          if (extractedData && Array.isArray(extractedData.items) && extractedData.items.length > 0) {
+            let resolvedCompany = String(extractedData.companyName || "").trim();
+            let resolvedAddress = sanitizeBuyerAddress(extractedData.companyAddress);
 
-          const formattedGmailDate = formatGmailDateToDDMMYY(fileObj.email_date);
-          const rawDocPoDate = extractedData.poDate || "";
+            if (resolvedCompany.toLowerCase().includes("classic automation")) {
+              resolvedCompany = "";
+            }
 
-          extractedData.items.forEach(item => {
-            const currentTotal = tableBody.querySelectorAll('tr').length + 1;
-            newlyExtracted++;
+            if ((!resolvedCompany || resolvedCompany.length < 3) && resolvedAddress.toLowerCase().includes("pantnagar")) {
+              resolvedCompany = "SWG INDUSTRIES LIMITED";
+            }
 
-            const finalPartNo = detectAndValidatePartNumber(item.partNo, item.desc);
+            if (!resolvedCompany || resolvedCompany.length < 2) {
+              resolvedCompany = "Buyer Organization";
+            }
 
-            addRowToTable({
-              sNo: currentTotal,
-              company: resolvedCompany,
-              address: resolvedAddress,
-              poNo: extractedData.poNo || "N/A",
-              poDate: rawDocPoDate,
-              gmailDate: formattedGmailDate,
-              partNo: finalPartNo,
-              desc: item.desc || "",
-              qty: item.qty || "1",
-              unit: item.unit || "NOS",
-              rate: item.rate || "0.00",
-              discountPercent: item.discountPercent || "0",
-              discountAmount: item.discountAmount || "0.00",
-              amount: item.amount || "0.00",
-              source: fileName
+            if (extractedPoNo) {
+              tableExistingPOs.add(extractedPoNo);
+            }
+
+            const formattedGmailDate = formatGmailDateToDDMMYY(fileObj.email_date);
+            const rawDocPoDate = extractedData.poDate || "";
+
+            extractedData.items.forEach(item => {
+              const currentTotal = tableBody.querySelectorAll('tr').length + 1;
+              newlyExtracted++;
+
+              const finalPartNo = detectAndValidatePartNumber(item.partNo, item.desc);
+
+              addRowToTable({
+                sNo: currentTotal,
+                company: resolvedCompany,
+                address: resolvedAddress,
+                poNo: extractedData.poNo || "N/A",
+                poDate: rawDocPoDate,
+                gmailDate: formattedGmailDate,
+                partNo: finalPartNo,
+                desc: item.desc || "",
+                qty: item.qty || "1",
+                unit: item.unit || "NOS",
+                rate: item.rate || "0.00",
+                discountPercent: item.discountPercent || "0",
+                discountAmount: item.discountAmount || "0.00",
+                amount: item.amount || "0.00",
+                source: fileName
+              });
             });
-          });
 
-          updateNumbersAndCount();
+            updateNumbersAndCount();
 
-          if (extractedPoNo && !forceReprocess) {
-            fetch(`${BACKEND_BASE}/mark-processed`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ po_numbers: [extractedPoNo] })
-            }).catch(() => {});
+            if (extractedPoNo && !forceReprocess) {
+              fetch(`${BACKEND_BASE}/mark-processed`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ po_numbers: [extractedPoNo] })
+              }).catch(() => {});
+            }
           }
+          processedTotal++;
+        } catch (docErr) {
+          skippedCount++;
+          processedTotal++;
+          statusText.textContent = `Error in ${fileName}: ${docErr.message}`;
         }
-        await sleep(500);
-      } catch (docErr) {
-        skippedCount++;
-        statusText.textContent = `Error reading ${fileName}: ${docErr.message}`;
-        alert(`API Error on ${fileName}:\n${docErr.message}`);
-        break;
       }
     }
 
-    statusText.textContent = `Done! Added ${newlyExtracted} item(s). Skipped ${skippedCount} non-PO file(s), ${duplicateSkipped} duplicate(s).`;
+    const workers = [];
+    const activeConcurrency = Math.min(CONCURRENCY_LIMIT, fileList.length);
+    for (let w = 0; w < activeConcurrency; w++) {
+      workers.push(worker());
+    }
+    await Promise.all(workers);
+
+    statusText.textContent = `Completed! Added ${newlyExtracted} item(s). Skipped ${skippedCount} non-PO file(s), ${duplicateSkipped} duplicate(s).`;
     return { newlyExtracted, skippedCount, duplicateSkipped };
   }
 
@@ -1135,41 +1152,34 @@ for (let f = 0; f < fileList.length; f++) {
     let candidateKeys = [initialKey, ...allKeysList.filter(k => k !== initialKey)];
     let lastError = null;
 
-    const systemInstruction = `You are an expert procurement auditor and ERP data extractor.
-Your job is to strictly analyze whether an attached document is an authentic PURCHASE ORDER, and extract line items with 100% financial accuracy.
+    const systemInstruction = `You are a high-speed ERP auditor.
+Determine if the document is an authentic PURCHASE ORDER, and extract line items with strict numerical precision.
 
 ════════════════════════════════════════════════════════════════════
-RULE 1: STRICT CLASSIFICATION & NON-PO REJECTION
+RULE 1: STRICT INVOICE/BILL REJECTION
 ════════════════════════════════════════════════════════════════════
-- Check the title, header, and watermark of the document.
-- If it is a "TAX INVOICE", "INVOICE", "PROFORMA INVOICE", "RETAIL INVOICE", "DELIVERY CHALLAN", "DISPATCH SLIP", "SALARY SLIP", "QUOTATION", "ESTIMATE", "RECEIPT", or "BANK STATEMENT":
-  -> Set "isPurchaseOrder": false
-  -> Set "documentType" to the actual type (e.g. "Tax Invoice")
-  -> Leave "items" empty: []
-- If and ONLY if it is an authentic "PURCHASE ORDER", "WORK ORDER", "PURCHASE INDENT", or "SUPPLY ORDER":
-  -> Set "isPurchaseOrder": true
-  -> Set "documentType": "Purchase Order"
+If title or document type is Tax Invoice, Retail Invoice, Challan, Quotation, Estimate, or Receipt:
+-> Set "isPurchaseOrder": false
+-> Return empty items: []
+Only set "isPurchaseOrder": true for genuine Purchase Order / Work Order / Purchase Indent.
 
 ════════════════════════════════════════════════════════════════════
-RULE 2: SEPARATION OF BUYER vs VENDOR
+RULE 2: BUYER vs VENDOR
 ════════════════════════════════════════════════════════════════════
-- The VENDOR/SUPPLIER is "Classic Automation and Control" (Rudrapur/Sidcul).
-- NEVER extract Classic Automation as the buyer!
-- Extract ONLY the actual client/buyer purchasing the goods and their plant/billing address.
+The VENDOR is "Classic Automation and Control" (Rudrapur/Sidcul). NEVER extract Classic Automation as buyer!
+Extract only the buying client company name and buyer address.
 
 ════════════════════════════════════════════════════════════════════
-RULE 3: ACCURATE QUANTITY & RATE EXTRACTION (NO COLUMN CONFUSION)
+RULE 3: QUANTITY, RATE & STRICT DISCOUNT ISOLATION
 ════════════════════════════════════════════════════════════════════
-In industrial PO tables:
-1. QUANTITY ("qty"): The ordered unit count (e.g. "10", "100", "2.5"). 
-   - NEVER confuse HSN/SAC (6-8 digits like 8536) or Item code with quantity!
-   - Remove text like 'NOS', 'MTR', 'KG'.
-2. UNIT RATE ("rate"): Price for ONE SINGLE unit before taxes and line discount.
-   - ZERO-TRUNCATION: Never drop zeros! (e.g. "2,500.00" must be "2500.00", NOT "2.5" or "25").
-   - NEVER extract the Line Total or Grand Total as Unit Rate.
-3. LINE AMOUNT ("amount"): The net taxable amount for this line before GST: (qty * rate) - discount.
-4. DISCOUNT: Extract percentage or absolute discount if mentioned, else "0".
-5. PART NUMBER: Authentic manufacturer catalog number (e.g. "LC1D25M7"). If absent, return "". Never return ERP codes like "ITM001".`;
+1. QUANTITY ("qty"): Pure ordered count (e.g. "10", "2.5"). Exclude unit names.
+2. UNIT RATE ("rate"): Single piece rate before taxes and discount. NEVER drop zeros (e.g. "15,000" is "15000.00").
+3. DISCOUNT RULE (STRICT):
+   - By DEFAULT, discount is 0.
+   - Do NOT extract payment terms (e.g., '30 days', '45 days'), GST rates ('18%', '28%'), or freight as discount!
+   - ONLY extract discount if there is an explicit printed column header like "Disc %" or "Discount" on that specific line item.
+   - If not clearly printed in a dedicated discount column, return "0".
+4. LINE AMOUNT ("amount"): Basic line value before GST. If discount exists: (qty * rate) - discountAmount, else (qty * rate).`;
 
     const jsonSchema = {
       type: "OBJECT",
@@ -1179,7 +1189,7 @@ In industrial PO tables:
         buyerCompanyName: { type: "STRING" },
         buyerBillingAddress: { type: "STRING" },
         poNumber: { type: "STRING" },
-        poDate: { type: "STRING", description: "Date of PO printed on document" },
+        poDate: { type: "STRING" },
         items: {
           type: "ARRAY",
           items: {
@@ -1221,14 +1231,15 @@ In industrial PO tables:
               },
               contents: [{
                 parts: [
-                  { text: "Examine this PDF document. Determine if it is a valid Purchase Order. If yes, extract buyer details and line items with strict rate, qty, and amount precision." },
+                  { text: "Analyze this document. Verify if Purchase Order. Extract clean lines. Strict: Do NOT invent discounts, keep discount 0 unless printed in an explicit column." },
                   { inline_data: { mime_type: "application/pdf", data: base64Pdf } }
                 ]
               }],
               generationConfig: { 
                 response_mime_type: "application/json",
                 response_schema: jsonSchema,
-                temperature: 0.0 
+                temperature: 0.0,
+                thinkingConfig: { thinkingBudget: 0 }
               }
             })
           });
@@ -1238,7 +1249,6 @@ In industrial PO tables:
             const candidate = resJson.candidates?.[0]?.content?.parts?.[0]?.text;
             let data = JSON.parse(candidate || "{}");
 
-            // Agar document PO nahi hai, toh direct reject flag dekar return karein
             if (data.isPurchaseOrder === false) {
               return { isPurchaseOrder: false, documentType: data.documentType || "Non-PO" };
             }
@@ -1251,7 +1261,6 @@ In industrial PO tables:
               poNo: (data.poNumber || "").trim(),
               poDate: (data.poDate || "").trim(),
               items: (data.items || []).map(it => {
-                // Number Sanitizer (Zero Truncation Guard & Multi-format normalization)
                 function cleanNumberString(val) {
                   if (val === undefined || val === null) return "0";
                   let str = String(val).trim();
@@ -1283,8 +1292,7 @@ In industrial PO tables:
 
                 if (q <= 0) q = 1;
 
-                // Mathematical Re-anchoring & Swapped Column Detection
-                // Agar AI ne Rate aur Amount ko swap kar diya ho
+                // Rate / Amount Column Swap Guard
                 if (r > a && a > 0 && q > 1) {
                   const checkRate = a / q;
                   if (Math.abs(checkRate * q - a) < 0.05) {
@@ -1294,18 +1302,42 @@ In industrial PO tables:
                   }
                 }
 
-                // Agar Rate missing ho par Amount ho
                 if (r === 0 && a > 0) {
-                  r = (a + da) / q;
+                  r = a / q;
                 }
 
-                // Agar Amount 0 ho par Rate aur Qty available ho
+                // STRICT DISCOUNT VALIDATION:
+                // Agar AI ne random percentage pakad li hai (e.g. 18% GST ya 30 din payment term), check math:
+                const rawTotal = q * r;
+                let validDiscount = false;
+
+                if (dp > 0 && dp < 90) {
+                  const calcDiscAmt = (rawTotal * dp) / 100;
+                  // Agar extracted amount aur calculation match kare tabhi valid manein
+                  if (a > 0 && Math.abs((rawTotal - calcDiscAmt) - a) < 1.0) {
+                    validDiscount = true;
+                    da = calcDiscAmt;
+                  }
+                }
+
+                if (!validDiscount && da > 0 && da < rawTotal) {
+                  if (a > 0 && Math.abs((rawTotal - da) - a) < 1.0) {
+                    validDiscount = true;
+                    dp = (da / rawTotal) * 100;
+                  }
+                }
+
+                // Agar discount mathematically document ke amount se match na kare, forcefully discard karein
+                if (!validDiscount) {
+                  dp = 0;
+                  da = 0;
+                }
+
                 if (a === 0 && r > 0) {
-                  if (dp > 0 && da === 0) da = (q * r * dp) / 100;
                   a = Math.max(0, (q * r) - da);
                 }
 
-                // Zero Truncation Recovery (e.g. 1500 returned as 15 or 1.5)
+                // Zero Truncation Recovery
                 if (r > 0 && a > 0 && q > 0) {
                   const expectedRate = (a + da) / q;
                   if (Math.abs((expectedRate / r) - 1000) < 50 || Math.abs((expectedRate / r) - 100) < 5) {
@@ -1319,7 +1351,7 @@ In industrial PO tables:
                   qty: q.toString(),
                   unit: (it.unit || "NOS").trim().toUpperCase(),
                   rate: r.toFixed(2),
-                  discountPercent: dp > 0 ? dp.toString() : "0",
+                  discountPercent: dp > 0 ? dp.toFixed(2) : "0",
                   discountAmount: da > 0 ? da.toFixed(2) : "0.00",
                   amount: a.toFixed(2)
                 };
@@ -1332,10 +1364,10 @@ In industrial PO tables:
 
           if (response.status === 429) {
             if (candidateKeys.length > 1 && key === candidateKeys[0]) {
-              statusText.textContent = `⚡ Key 1 rate limit hit. Switching to Key 2...`;
+              statusText.textContent = `⚡ Key 1 rate limit reached. Switching to Key 2...`;
               break; 
             } else {
-              await countdownWait(12, "Rate limit reached on keys");
+              await countdownWait(10, "Rate limit reached on keys");
               continue;
             }
           }
@@ -1350,7 +1382,6 @@ In industrial PO tables:
           if (netErr.message.includes("Google API Authentication Error")) {
             throw netErr;
           }
-          await sleep(500);
         }
       }
     }
