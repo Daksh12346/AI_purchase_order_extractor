@@ -698,38 +698,37 @@
     return blockedTerms.some(t => lower.includes(t));
   }
 
- function detectAndValidatePartNumber(aiPartNo) {
+  function detectAndValidatePartNumber(aiPartNo) {
     if (!aiPartNo || typeof aiPartNo !== 'string') return "";
     let candidate = aiPartNo.trim();
 
     if (!candidate) return "";
 
-    // 1. Common junk words, symbols, and null states reject karein
+    // Common junk words, symbols, and null states reject karein
     if (/^(NA|N\/A|NIL|NONE|NULL|-|_|\.|\/)$/i.test(candidate)) return "";
 
-    // 2. Unit names and brand words reject karein
+    // Unit names and brand words reject karein
     if (/^(SCHNEIDER|SIEMENS|L&T|ABB|HAVELLS|LEGRAND|NOS|SET|PCS|EA|MTR|KG|LOT|NO|PKT|PAIR)$/i.test(candidate)) return "";
 
-    // 3. Internal item codes, serials, descriptions reject karein
+    // Internal item codes, serials, descriptions reject karein
     if (/^(ITEM\b|ITM\b|MAT\b|IND\b|CODE\b|SR\b|SL\b|S\.NO|POS\b|LINE\b)/i.test(candidate)) return "";
 
-    // 4. Electrical ratings / dimensions reject karein (e.g., 10A, 415V, 2.5SQMM)
+    // Electrical ratings / dimensions reject karein
     if (/^(\d+P|\d+A|\d+V|\d+KW|\d+HP|\d+K|\d+-WAY|\d+MM|\d+X\d+|\d+SQMM)$/i.test(candidate)) return "";
 
-    // 5. Pure 6-digit or 8-digit numbers HSN/SAC codes hote hain, part number nahi
+    // Pure 6-digit or 8-digit numbers HSN/SAC codes hote hain
     if (/^\d{6,8}$/.test(candidate)) return "";
 
-    // 6. Genuine industrial part number must contain letters and numbers OR standard industrial catalog pattern
-    // Examples: 3RT2026-1BB40, LC1D25M7, 3VA1116-3ED36-0AA0, A9F74216
+    // Genuine industrial part number must contain letters and numbers
     const isAuthenticPartNo = /^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9\-\/]{4,25}$/;
 
     if (isAuthenticPartNo.test(candidate)) {
       return candidate;
     }
 
-    // Koi bhi doubt ya generic number ho toh direct BLANK
     return "";
   }
+
   function parseFlexibleDate(dateStr) {
     if (!dateStr) return null;
     const clean = String(dateStr).trim().replace(/[./]/g, '-');
@@ -1086,7 +1085,7 @@
     let candidateKeys = [initialKey, ...allKeysList.filter(k => k !== initialKey)];
     let lastError = null;
 
-const systemInstruction = `You are a forensic industrial procurement auditor inspecting Purchase Order documents.
+    const systemInstruction = `You are a forensic industrial procurement auditor inspecting Purchase Order documents.
 Your primary directive is ZERO-ERROR extraction of financial columns: QUANTITY, UNIT RATE, and LINE AMOUNT.
 
 ════════════════════════════════════════════════════════════════════
@@ -1135,69 +1134,27 @@ Inspect the table structure vertically under the header labels:
         buyerBillingAddress: { type: "STRING" },
         poNumber: { type: "STRING" },
         poDate: { type: "STRING" },
-     items: (data.items || []).map(it => {
-              // 1. Raw string cleanup (Commas, currency signs, spaces remove)
-              let rawQty = String(it.qty || "1").replace(/[^0-9.]/g, '') || "1";
-              let rawRate = String(it.rate || "0").replace(/[^0-9.]/g, '') || "0";
-              let rawDiscPct = String(it.discountPercent || "0").replace(/[^0-9.]/g, '') || "0";
-              let rawDiscAmt = String(it.discountAmount || "0").replace(/[^0-9.]/g, '') || "0";
-              let rawAmt = String(it.amount || "0").replace(/[^0-9.]/g, '') || "0";
-
-              let q = parseFloat(rawQty) || 1;
-              let r = parseFloat(rawRate) || 0;
-              let dp = parseFloat(rawDiscPct) || 0;
-              let da = parseFloat(rawDiscAmt) || 0;
-              let a = parseFloat(rawAmt) || 0;
-
-              // 2. Quantity Sanity Check (Quantity cannot be 0)
-              if (q <= 0) q = 1;
-
-              // 3. Discount calculation
-              if (dp > 0 && da === 0 && r > 0) {
-                da = (q * r * dp) / 100;
-              }
-
-              // 4. CROSS-CHECK 1: Column Swap Check (Rate me Line Total ghus gaya ho)
-              // Example: Qty = 5, Rate = 25000, Amount = 25000 -> Rate must be 5000
-              if (q > 1 && a > 0 && Math.abs(r - a) < 0.05) {
-                r = a / q;
-              }
-
-              // 5. CROSS-CHECK 2: Missing Rate recovery
-              if (r === 0 && a > 0 && q > 0) {
-                r = (a + da) / q;
-              }
-
-              // 6. CROSS-CHECK 3: Mathematical Reconciliation
-              // Expected line total = (Qty * Rate) - Discount
-              const expectedAmt = (q * r) - da;
-
-              if (a === 0 && r > 0) {
-                a = Math.max(0, expectedAmt);
-              } else if (a > 0 && r > 0 && q > 1) {
-                // Agar AI ne Grand Total bhej diya jo (Qty * Rate) se 2x se zyada bada ho
-                if (a > (expectedAmt * 1.5)) {
-                  a = Math.max(0, expectedAmt);
-                }
-              }
-
-              return {
-                partNo: it.partNo || "",
-                desc: it.desc || "",
-                qty: q.toString(),
-                unit: (it.unit || "NOS").trim().toUpperCase(),
-                rate: r.toFixed(2),
-                discountPercent: dp > 0 ? dp.toString() : "0",
-                discountAmount: da > 0 ? da.toFixed(2) : "0",
-                amount: a.toFixed(2)
-              };
-            })
+        items: {
+          type: "ARRAY",
+          items: {
+            type: "OBJECT",
+            properties: {
+              partNo: { type: "STRING", description: "Manufacturer catalog/model number only. Strictly empty string \"\" if not explicitly printed." },
+              desc: { type: "STRING", description: "Complete item description." },
+              qty: { type: "STRING", description: "Numeric quantity only, no unit strings." },
+              unit: { type: "STRING", description: "Unit of measurement (e.g., NOS, SET, MTR, EA)." },
+              rate: { type: "STRING", description: "Single unit price before tax. Strictly exclude line totals." },
+              discountPercent: { type: "STRING", description: "Discount percentage or 0." },
+              discountAmount: { type: "STRING", description: "Discount value in currency or 0." },
+              amount: { type: "STRING", description: "Line item taxable total: (qty * rate) - discount. Never Grand Total." }
+            },
             required: ["desc", "qty", "rate", "amount"]
           }
         }
       },
       required: ["isPurchaseOrder", "buyerCompanyName", "poNumber", "items"]
     };
+
     for (let key of candidateKeys) {
       const cleanKey = key.trim();
 
@@ -1242,39 +1199,57 @@ Inspect the table structure vertically under the header labels:
               poNo: (data.poNumber || "").trim(),
               date: (data.poDate || "").trim(),
               items: (data.items || []).map(it => {
-                const cleanQty = String(it.qty || "1").replace(/[^0-9.]/g, '') || "1";
-                const cleanRate = String(it.rate || "0").replace(/[^0-9.]/g, '') || "0";
-                const cleanDiscPct = String(it.discountPercent || "0").replace(/[^0-9.]/g, '') || "0";
-                let cleanDiscAmt = String(it.discountAmount || "0").replace(/[^0-9.]/g, '') || "0";
-                let cleanAmt = String(it.amount || "0").replace(/[^0-9.]/g, '') || "0";
+                // 1. Raw string cleanup (Commas, currency signs, spaces remove)
+                let rawQty = String(it.qty || "1").replace(/[^0-9.]/g, '') || "1";
+                let rawRate = String(it.rate || "0").replace(/[^0-9.]/g, '') || "0";
+                let rawDiscPct = String(it.discountPercent || "0").replace(/[^0-9.]/g, '') || "0";
+                let rawDiscAmt = String(it.discountAmount || "0").replace(/[^0-9.]/g, '') || "0";
+                let rawAmt = String(it.amount || "0").replace(/[^0-9.]/g, '') || "0";
 
-                const q = parseFloat(cleanQty) || 1;
-                const r = parseFloat(cleanRate) || 0;
-                const dp = parseFloat(cleanDiscPct) || 0;
-                let da = parseFloat(cleanDiscAmt) || 0;
-                let a = parseFloat(cleanAmt) || 0;
+                let q = parseFloat(rawQty) || 1;
+                let r = parseFloat(rawRate) || 0;
+                let dp = parseFloat(rawDiscPct) || 0;
+                let da = parseFloat(rawDiscAmt) || 0;
+                let a = parseFloat(rawAmt) || 0;
 
+                // 2. Quantity Sanity Check (Quantity cannot be 0)
+                if (q <= 0) q = 1;
+
+                // 3. Discount calculation
                 if (dp > 0 && da === 0 && r > 0) {
                   da = (q * r * dp) / 100;
-                  cleanDiscAmt = da.toFixed(2);
                 }
 
-                if ((a === 0 || isNaN(a)) && r > 0) {
-                  a = (q * r) - da;
-                  cleanAmt = a.toFixed(2);
-                } else if (a > 0) {
-                  cleanAmt = a.toFixed(2);
+                // 4. CROSS-CHECK 1: Column Swap Check (Rate me Line Total ghus gaya ho)
+                if (q > 1 && a > 0 && Math.abs(r - a) < 0.05) {
+                  r = a / q;
+                }
+
+                // 5. CROSS-CHECK 2: Missing Rate recovery
+                if (r === 0 && a > 0 && q > 0) {
+                  r = (a + da) / q;
+                }
+
+                // 6. CROSS-CHECK 3: Mathematical Reconciliation
+                const expectedAmt = (q * r) - da;
+
+                if (a === 0 && r > 0) {
+                  a = Math.max(0, expectedAmt);
+                } else if (a > 0 && r > 0 && q > 1) {
+                  if (a > (expectedAmt * 1.5)) {
+                    a = Math.max(0, expectedAmt);
+                  }
                 }
 
                 return {
                   partNo: it.partNo || "",
                   desc: it.desc || "",
-                  qty: cleanQty,
-                  unit: it.unit || "NOS",
-                  rate: cleanRate,
-                  discountPercent: cleanDiscPct,
-                  discountAmount: cleanDiscAmt,
-                  amount: cleanAmt
+                  qty: q.toString(),
+                  unit: (it.unit || "NOS").trim().toUpperCase(),
+                  rate: r.toFixed(2),
+                  discountPercent: dp > 0 ? dp.toString() : "0",
+                  discountAmount: da > 0 ? da.toFixed(2) : "0",
+                  amount: a.toFixed(2)
                 };
               })
             };
@@ -1283,7 +1258,7 @@ Inspect the table structure vertically under the header labels:
           const errData = await response.json().catch(() => ({}));
           const errMsg = errData.error?.message || `HTTP ${response.status}`;
 
-          // Rate limit 429 par agar dusri key available hai toh bina rukhe switch karega
+          // Rate limit 429 handling with key failover
           if (response.status === 429) {
             if (candidateKeys.length > 1 && key === candidateKeys[0]) {
               statusText.textContent = `⚡ Key 1 rate limit reached. Auto-switching to Key 2 immediately...`;
