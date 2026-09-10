@@ -240,6 +240,19 @@
     .btn-gmail { background: #1A73E8; }
     .btn-gmail:hover { background: #1557B0; }
 
+    .btn-stop {
+      background: #C62828;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      font-size: 14px;
+      font-weight: 600;
+      border-radius: 5px;
+      cursor: pointer;
+      display: none;
+    }
+    .btn-stop:hover { background: #8E0000; }
+
     .btn-search {
       background: #2D3748;
       height: 35px;
@@ -487,6 +500,7 @@
 
     <div class="action-buttons">
       <button type="button" class="btn-main" id="processBtn">Extract Local Files</button>
+      <button type="button" class="btn-stop" id="stopBtn">🛑 Stop Extraction</button>
       <button type="button" class="btn-secondary" id="clearHistoryBtn" title="Deletes backend memory of processed POs">🗑 Reset Processed PO History</button>
     </div>
 
@@ -562,6 +576,7 @@
   const clearHistoryBtn = document.getElementById('clearHistoryBtn');
   const pdfInput = document.getElementById('pdfInput');
   const processBtn = document.getElementById('processBtn');
+  const stopBtn = document.getElementById('stopBtn');
   const statusText = document.getElementById('statusText');
   const tableBox = document.getElementById('tableBox');
   const tableBody = document.getElementById('tableBody');
@@ -589,6 +604,7 @@
   const btnLast7 = document.getElementById('btnLast7');
 
   let isLiveProcessing = false;
+  let abortRequested = false;
 
   const FAST_MODELS = [
     "gemini-2.5-flash",
@@ -620,6 +636,12 @@
   });
   gmailEmail.addEventListener('input', () => {
     localStorage.setItem('gmail_email', gmailEmail.value.trim());
+  });
+
+  stopBtn.addEventListener('click', () => {
+    abortRequested = true;
+    statusText.textContent = "Stopping extraction... Finishing pending file.";
+    stopBtn.disabled = true;
   });
 
   function getActiveApiKeys() {
@@ -706,7 +728,7 @@
 
   async function countdownWait(seconds, reason = "Rate limit hit") {
     let remaining = Math.ceil(seconds);
-    while (remaining > 0) {
+    while (remaining > 0 && !abortRequested) {
       statusText.textContent = `⏳ ${reason}. Waiting ${remaining}s before auto-retrying...`;
       await sleep(1000);
       remaining--;
@@ -866,7 +888,6 @@
 
       let visible = true;
 
-      // Live processing ke dauran naye rows ko hide na karein
       if (!isLiveProcessing) {
         if (searchTerm) {
           const fullRowText = `${poVal} ${compVal} ${partVal} ${descVal} ${poDateVal}`.toLowerCase();
@@ -934,6 +955,10 @@
     let processedTotal = 0;
 
     isLiveProcessing = true;
+    abortRequested = false;
+    stopBtn.style.display = 'inline-flex';
+    stopBtn.disabled = false;
+
     tableBox.style.display = 'block';
     metricsGrid.style.display = 'grid';
 
@@ -948,6 +973,8 @@
 
     async function worker() {
       while (fileCursor < fileList.length) {
+        if (abortRequested) break;
+
         const currentIndex = fileCursor++;
         const fileObj = fileList[currentIndex];
         const fileName = (fileObj && (fileObj.name || fileObj.filename)) ? (fileObj.name || fileObj.filename) : `Document_${currentIndex + 1}.pdf`;
@@ -969,7 +996,7 @@
           if (!extractedData || extractedData.isPurchaseOrder === false) {
             skippedCount++;
             processedTotal++;
-            statusText.textContent = `[${processedTotal}/${fileList.length}] Skipped Non-PO: ${fileName}`;
+            statusText.textContent = `[${processedTotal}/${fileList.length}] Skipped Non-PO / No items: ${fileName}`;
             continue;
           }
 
@@ -1013,7 +1040,7 @@
             const formattedGmailDate = formatGmailDateToDDMMYY(fileObj.email_date);
             const rawDocPoDate = extractedData.poDate || "";
 
-            // TURANT LIVE DISPLAY PAR RENDER KAREIN
+            // TURANT LIVE TABLE ROW APPEND
             items.forEach(item => {
               const currentTotal = tableBody.querySelectorAll('tr').length + 1;
               newlyExtracted++;
@@ -1038,14 +1065,12 @@
                 source: fileName
               });
 
-              // Green flash effect on live entry
               newRow.classList.add('newly-added');
               setTimeout(() => newRow.classList.remove('newly-added'), 2000);
             });
 
             updateNumbersAndCount();
 
-            // Auto-scroll table to newest item
             const tableScrollContainer = document.querySelector('.table-scroll');
             if (tableScrollContainer) {
               tableScrollContainer.scrollTop = tableScrollContainer.scrollHeight;
@@ -1078,8 +1103,11 @@
     await Promise.all(workers);
 
     isLiveProcessing = false;
+    stopBtn.style.display = 'none';
     updateNumbersAndCount();
-    statusText.textContent = `Done! Added ${newlyExtracted} item(s). Skipped ${skippedCount} non-PO / unreadable files.`;
+    statusText.textContent = abortRequested
+      ? `Stopped by user! Extracted ${newlyExtracted} item(s).`
+      : `Done! Added ${newlyExtracted} item(s). Skipped ${skippedCount} non-PO / unreadable files.`;
     return { newlyExtracted, skippedCount, duplicateSkipped };
   }
 
@@ -1192,25 +1220,15 @@
     let candidateKeys = [initialKey, ...allKeysList.filter(k => k !== initialKey)];
     let lastError = null;
 
-    const systemInstruction = `You are an ERP purchase order data extractor.
-Your job is to extract commercial procurement details from the document.
+    const systemInstruction = `You are an expert ERP Purchase Order Data Extractor.
+Extract procurement items from the document.
 
 RULES:
-1. DOCUMENT FILTER:
-   - ONLY reject if the document is explicitly a "TAX INVOICE", "RETAIL INVOICE", "COMMERCIAL INVOICE", "DELIVERY CHALLAN", "SALARY SLIP", or "RECEIPT".
-   - Accept all variations of: Purchase Order, Work Order, Letter of Intent (LOI), Purchase Indent, Procurement Order, Supply Order, Service Order, Contract.
-   - If acceptable, set isPurchaseOrder: true.
-
-2. VENDOR vs BUYER:
-   - "Classic Automation and Control" is the VENDOR/SELLER. NEVER output Classic Automation as the buyer.
-   - Extract the Client/Customer company name and their billing/shipping address.
-
-3. NUMERIC EXTRACTION:
-   - "qty": Numerical quantity (remove units like NOS, PCS, MTR).
-   - "rate": Unit price before GST. Never truncate (e.g., 2,500.00 stays 2500.00).
-   - "discountPercent" & "discountAmount": Default to "0". Only populate if an explicit discount column is printed.
-   - "amount": Line total before tax.
-   - "partNo": Manufacturer model/catalog code if present. Else empty string.`;
+1. ONLY reject (set isPurchaseOrder: false) if the file is explicitly an invoice, delivery challan, or salary receipt.
+2. If it is a Purchase Order, Indent, Work Order, LOI, or Supply Contract, ALWAYS set isPurchaseOrder: true.
+3. Classic Automation is the vendor/seller. Extract the CLIENT / BUYER company name and address.
+4. Always extract the items table: part number, description, quantity, unit rate, and total amount.
+5. You MUST return ONLY a clean, valid JSON object matching the requested schema.`;
 
     const jsonSchema = {
       type: "OBJECT",
@@ -1233,8 +1251,7 @@ RULES:
               discountPercent: { type: "STRING" },
               discountAmount: { type: "STRING" },
               amount: { type: "STRING" }
-            },
-            required: ["desc", "qty", "rate", "amount"]
+            }
           }
         }
       },
@@ -1245,6 +1262,8 @@ RULES:
       const cleanKey = key.trim();
 
       for (let rawModel of FAST_MODELS) {
+        if (abortRequested) throw new Error("Operation cancelled by user.");
+
         const cleanModel = rawModel.replace(/^models\//, "");
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent?key=${cleanKey}`;
 
@@ -1252,8 +1271,7 @@ RULES:
           const response = await fetch(url, {
             method: "POST",
             headers: { 
-              "Content-Type": "application/json",
-              "x-goog-api-key": cleanKey 
+              "Content-Type": "application/json"
             },
             body: JSON.stringify({
               system_instruction: {
@@ -1261,7 +1279,7 @@ RULES:
               },
               contents: [{
                 parts: [
-                  { text: "Extract all items from this order document. If it is an order/indent/PO, extract all rows completely." },
+                  { text: "Extract all items from this purchase document in strict JSON." },
                   { inline_data: { mime_type: "application/pdf", data: base64Pdf } }
                 ]
               }],
@@ -1275,8 +1293,19 @@ RULES:
 
           if (response.ok) {
             const resJson = await response.json();
-            const candidate = resJson.candidates?.[0]?.content?.parts?.[0]?.text;
-            let data = JSON.parse(candidate || "{}");
+            let candidateText = resJson.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+            
+            // Markdown fences safai (agar model ```json include kare)
+            candidateText = candidateText.replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim();
+            
+            let data = {};
+            try {
+              data = JSON.parse(candidateText);
+            } catch (e) {
+              // Regex fallback agar JSON slightly truncated ho
+              const match = candidateText.match(/\{[\s\S]*\}/);
+              if (match) data = JSON.parse(match[0]);
+            }
 
             if (data.isPurchaseOrder === false) {
               return { isPurchaseOrder: false };
@@ -1291,8 +1320,7 @@ RULES:
               items: (data.items || []).map(it => {
                 function cleanNumberString(val) {
                   if (val === undefined || val === null) return "0";
-                  let str = String(val).trim();
-                  str = str.replace(/[₹RsINR$\s/A-Za-z]/g, '');
+                  let str = String(val).trim().replace(/[₹RsINR$\s/A-Za-z]/g, '');
 
                   if (str.includes(',') && str.includes('.')) {
                     if (str.lastIndexOf('.') > str.lastIndexOf(',')) {
@@ -1319,14 +1347,8 @@ RULES:
                 let a = parseFloat(cleanNumberString(it.amount)) || 0;
 
                 if (q <= 0) q = 1;
-
-                if (r === 0 && a > 0) {
-                  r = a / q;
-                }
-
-                if (a === 0 && r > 0) {
-                  a = (q * r) - da;
-                }
+                if (r === 0 && a > 0) r = a / q;
+                if (a === 0 && r > 0) a = (q * r) - da;
 
                 return {
                   partNo: (it.partNo || "").trim(),
