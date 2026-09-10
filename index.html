@@ -583,14 +583,13 @@
   const btnToday = document.getElementById('btnToday');
   const btnYesterday = document.getElementById('btnYesterday');
   const btnLast7 = document.getElementById('btnLast7');
-
-  // Ultra-fast prioritized models
+  
+ // Official Gemini 3 Generation Fast Models
   const FAST_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-3.5-flash"
+    "gemini-3-flash",
+    "gemini-3-flash-preview",
+    "gemini-3-pro"
   ];
-
   const BACKEND_BASE = window.location.origin;
 
   if (localStorage.getItem('gemini_api_key_custom_1')) {
