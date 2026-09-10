@@ -418,7 +418,7 @@
 <div class="container">
   <div class="header-box">
     <h1>AI Purchase Order Extractor</h1>
-    <p class="subtitle">Dual-Key Industrial Procurement Engine (Strict Mathematical Re-Check & Part No Extraction)</p>
+    <p class="subtitle">Industrial Procurement Engine (Anti-Truncation Rate & Exact Part No Parsing)</p>
 
     <!-- 2 USER-INPUT API KEY BOXES -->
     <div class="api-key-container">
@@ -525,7 +525,7 @@
             <th data-key="desc" style="min-width: 300px;">Description</th>
             <th data-key="qty" style="min-width: 70px;">Qty</th>
             <th data-key="unit" style="min-width: 70px;">Unit</th>
-            <th data-key="rate" style="min-width: 90px;">Rate</th>
+            <th data-key="rate" style="min-width: 95px;">Rate</th>
             <th data-key="discountPercent" style="min-width: 110px;">Discount (%)</th>
             <th data-key="discountAmount" style="min-width: 120px;">Discount Amount</th>
             <th data-key="amount" style="min-width: 105px;">Amount</th>
@@ -732,8 +732,8 @@
       if (/^(NOS|SET|PCS|EA|MTR|KG|LOT|NO|PKT|PAIR|METRE|COIL|ROLL|BAG|BOX|PACK)$/i.test(s)) return true;
       if (/^(ITEM|ITM|MAT|IND|CODE|SR|SL|SNO|LINE|POS|DESCR|TYPE|MAKE|BRAND|MODEL|SIZE|RATING)\b/i.test(s)) return true;
       if (/^(\d+P|\d+A|\d+V|\d+KW|\d+HP|\d+K|\d+-WAY|\d+MM|\d+X\d+|\d+SQMM|\d+VAC|\d+VDC|\d+AMP|\d+POLE)$/i.test(s)) return true;
-      if (/^\d{6,8}$/.test(s)) return true; // Pure HSN / SAC Code
-      if (/^\d{1,4}$/.test(s)) return true; // Plain short numbers (Serial Nos)
+      if (/^\d{6,8}$/.test(s)) return true; // Pure HSN/SAC Code
+      if (/^\d{1,4}$/.test(s)) return true; // Serial numbers
       return false;
     }
 
@@ -742,25 +742,22 @@
       const c = code.trim();
       if (c.length < 4 || c.length > 28) return false;
 
-      // Pattern 1: Alphanumeric standard codes (e.g., LC1D25M7, 3RT2026-1BB40, A9F74216, 3VA1116-3ED36-0AA0)
+      // Pattern 1: Alphanumeric standard codes with hyphens/dots (e.g. 3RT2026-1BB40, 3VA1116-3ED36-0AA0)
       if (/^[A-Za-z0-9]+(?:[-/.][A-Za-z0-9]+)+$/.test(c)) return true;
-      // Pattern 2: Contains letters and numbers mixed
+      // Pattern 2: Contains letters and numbers mixed (e.g. LC1D25M7, A9F74216, LADN22)
       if (/^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9]{4,25}$/.test(c)) return true;
-      // Pattern 3: Standard 5-9 digit catalog numbers (e.g. 1002345, 520034) if not pure HSN
+      // Pattern 3: Standard 5-9 alphanumeric prefix catalog models
       if (/^[A-Z]{2,5}[0-9]{2,6}$/i.test(c)) return true;
 
       return false;
     }
 
-    // Check candidate passed from dedicated column
     let colCandidate = cleanCandidate(aiPartNo);
     if (colCandidate && isAuthenticCode(colCandidate)) {
       return colCandidate;
     }
 
-    // Check inside Description text
     if (descText && typeof descText === 'string') {
-      // Split by whitespace and common punctuation, keeping hyphens and slashes intact
       const tokens = descText.split(/[\s,;()\[\]{}|]+/);
       for (let t of tokens) {
         let cleanToken = cleanCandidate(t);
@@ -1156,7 +1153,7 @@ RULE 2: BUYER vs VENDOR DISTINCTION
 RULE 3: PO DATE (PDF DOCUMENT DATE)
 ════════════════════════════════════════════════════════════════════
 - Under poDate, extract the EXACT date printed on the Purchase Order document next to labels like "PO Date:", "Order Date:", "Date:".
-- Output the date EXACTLY AS PRINTED in the PDF without converting (e.g. "15.08.2026").
+- Output the date EXACTLY AS PRINTED in the PDF without converting (e.g. "15.08.2026", "22-Jul-2026").
 
 ════════════════════════════════════════════════════════════════════
 RULE 4: PART NUMBER EXTRACTION
@@ -1174,7 +1171,10 @@ RULE 5: PRECISE TABLE COLUMN ANCHORING (QUANTITY vs RATE vs AMOUNT)
 1. QUANTITY ("qty"): Numeric value only (e.g., "10", "2.5"). Strip "NOS", "SET".
 2. UNIT RATE ("rate"): Price of a SINGLE unit before tax and discount.
    - Column labels: "Unit Rate", "Rate", "Basic Price", "Price/Unit", "Unit Price".
-   - CRITICAL: Do NOT put the Line Total / Amount in the Rate! Clean number only (e.g., "1250.00").
+   - CRITICAL ZERO-TRUNCATION WARNING: Read numbers carefully without dropping thousands zeroes!
+     * Example: "35,000/-" or "35000.00" MUST BE extracted as "35000.00". NEVER output "35" or "35.00"!
+     * Do NOT convert Indian comma formatting incorrectly.
+   - CRITICAL: Do NOT copy the Line Total / Amount in the Rate! Clean number only.
 3. DISCOUNT ("discountPercent", "discountAmount"): Explicit line discount if printed, else "0".
 4. LINE AMOUNT ("amount"): Basic taxable line total = (qty * rate) - discountAmount. Never PO Grand Total.`;
 
@@ -1196,7 +1196,7 @@ RULE 5: PRECISE TABLE COLUMN ANCHORING (QUANTITY vs RATE vs AMOUNT)
               desc: { type: "STRING", description: "Complete item description." },
               qty: { type: "STRING", description: "Numeric quantity only, no unit strings." },
               unit: { type: "STRING", description: "Unit of measurement (e.g., NOS, SET, MTR, EA)." },
-              rate: { type: "STRING", description: "Single unit price before tax. Strictly exclude line totals." },
+              rate: { type: "STRING", description: "Single unit price before tax. Full value without dropping thousands zeros. Strictly exclude line totals." },
               discountPercent: { type: "STRING", description: "Discount percentage or 0." },
               discountAmount: { type: "STRING", description: "Discount value in currency or 0." },
               amount: { type: "STRING", description: "Line item taxable total: (qty * rate) - discount. Never Grand Total." }
@@ -1252,53 +1252,74 @@ RULE 5: PRECISE TABLE COLUMN ANCHORING (QUANTITY vs RATE vs AMOUNT)
               poNo: (data.poNumber || "").trim(),
               poDate: (data.poDate || "").trim(),
               items: (data.items || []).map(it => {
-                // Strict Sanitization of Numerics
-                function sanitizeNumber(val) {
-                  if (!val) return "0";
-                  let s = String(val).replace(/,/g, '').replace(/[^0-9.]/g, '');
-                  let parts = s.split('.');
-                  if (parts.length > 2) s = parts[0] + '.' + parts.slice(1).join('');
-                  return s || "0";
+                // ROBUST NUMERIC SANITIZER (Completely prevents 35000 from turning into 35)
+                function cleanNumberString(val) {
+                  if (val === undefined || val === null) return "0";
+                  let str = String(val).trim();
+
+                  // Remove currency symbols, units, spaces
+                  str = str.replace(/[₹RsINR$\s/A-Za-z]/g, '');
+
+                  // Agar comma aur dot dono hain (e.g. 35,000.00)
+                  if (str.includes(',') && str.includes('.')) {
+                    if (str.lastIndexOf('.') > str.lastIndexOf(',')) {
+                      str = str.replace(/,/g, '');
+                    } else {
+                      str = str.replace(/\./g, '').replace(',', '.');
+                    }
+                  } else if (str.includes(',')) {
+                    // Agar sirf comma hai: 35,000 -> 35000
+                    const commaParts = str.split(',');
+                    if (commaParts.length === 2 && commaParts[1].length === 2) {
+                      str = commaParts[0] + '.' + commaParts[1];
+                    } else {
+                      str = str.replace(/,/g, '');
+                    }
+                  } else if (str.includes('.')) {
+                    // Agar dot thousands separator ki tarah use hua ho: 35.000 -> 35000
+                    const dotParts = str.split('.');
+                    if (dotParts.length === 2 && dotParts[1].length === 3) {
+                      str = dotParts[0] + dotParts[1];
+                    }
+                  }
+
+                  str = str.replace(/[^0-9.]/g, '');
+                  return str || "0";
                 }
 
-                let q = parseFloat(sanitizeNumber(it.qty)) || 1;
-                let r = parseFloat(sanitizeNumber(it.rate)) || 0;
-                let dp = parseFloat(sanitizeNumber(it.discountPercent)) || 0;
-                let da = parseFloat(sanitizeNumber(it.discountAmount)) || 0;
-                let a = parseFloat(sanitizeNumber(it.amount)) || 0;
+                let q = parseFloat(cleanNumberString(it.qty)) || 1;
+                let r = parseFloat(cleanNumberString(it.rate)) || 0;
+                let dp = parseFloat(cleanNumberString(it.discountPercent)) || 0;
+                let da = parseFloat(cleanNumberString(it.discountAmount)) || 0;
+                let a = parseFloat(cleanNumberString(it.amount)) || 0;
 
                 if (q <= 0) q = 1;
 
-                // Discount auto-calculation
-                if (dp > 0 && da === 0 && r > 0) {
-                  da = (q * r * dp) / 100;
+                // 1. Thousand Truncation Guard: (Fixes 35000 extracted as 35)
+                if (r > 0 && a >= 1000 && (a / q) >= 500) {
+                  const impliedRate = (a + da) / q;
+                  if (Math.abs(impliedRate / r - 1000) < 100 || Math.abs(impliedRate / r - 100) < 10) {
+                    r = impliedRate;
+                  }
                 }
 
-                // MATHEMATICAL RE-CHECK LOGIC FOR RATE & AMOUNT
-                // 1. Agar Rate aur Amount barabar hain aur Qty > 1 hai -> Rate column shifted tha
-                if (q > 1 && a > 0 && Math.abs(r - a) < 0.05) {
-                  r = (a + da) / q;
-                }
-
-                // 2. Agar Rate missing hai aur Amount diya hai
+                // 2. Missing Rate recovery
                 if (r === 0 && a > 0) {
                   r = (a + da) / q;
                 }
 
-                // 3. Agar Amount missing hai aur Rate diya hai
-                if (a === 0 && r > 0) {
-                  a = Math.max(0, (q * r) - da);
+                // 3. Discount calculation
+                if (dp > 0 && da === 0 && r > 0) {
+                  da = (q * r * dp) / 100;
                 }
 
-                // 4. Rate x Qty vs Amount reconciliation
-                const calculatedExpectedAmt = (q * r) - da;
-                if (r > 0 && a > 0 && q > 1) {
-                  // Agar extracted amount expected amount se drastically mismatch ho (jaise Grand Total ho)
-                  if (Math.abs(a - calculatedExpectedAmt) > (calculatedExpectedAmt * 0.4)) {
-                    // Check if 'a' is actually a line total that was mistakenly swapped
-                    if (Math.abs((a / q) - r) > 1) {
-                      a = calculatedExpectedAmt;
-                    }
+                // 4. Rate x Qty vs Amount validation
+                const expectedAmt = (q * r) - da;
+                if (a === 0 && r > 0) {
+                  a = Math.max(0, expectedAmt);
+                } else if (a > 0 && r > 0) {
+                  if (Math.abs(a - expectedAmt) > (expectedAmt * 0.4) && expectedAmt > 0) {
+                    a = expectedAmt;
                   }
                 }
 
