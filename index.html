@@ -418,9 +418,8 @@
 <div class="container">
   <div class="header-box">
     <h1>AI Purchase Order Extractor</h1>
-    <p class="subtitle">Complete Procurement System (Zero Truncation, Exact Math, Buyer-Only Address)</p>
+    <p class="subtitle">Complete Procurement System (Zero Truncation, Strict Document Validation, Accurate Rate/Qty Mapping)</p>
 
-    <!-- 2 USER-INPUT API KEY BOXES -->
     <div class="api-key-container">
       <div class="api-key-box">
         <label for="apiKeyInput1">🔑 Gemini API Key 1:</label>
@@ -479,7 +478,7 @@
 
     <div class="upload-zone">
       <input type="file" id="pdfInput" accept=".pdf,application/pdf" multiple>
-      <div style="font-size: 12px; color: #888; margin-top: 6px;">Upload Purchase Order PDFs manually</div>
+      <div style="font-size: 12px; color: #888; margin-top: 6px;">Upload all PDF documents (non-PO documents will be automatically skipped)</div>
     </div>
 
     <div class="action-buttons">
@@ -487,7 +486,7 @@
       <button type="button" class="btn-secondary" id="clearHistoryBtn" title="Deletes backend memory of processed POs">🗑 Reset Processed PO History</button>
     </div>
 
-    <div class="status-text" id="statusText">Select dates and click "Fetch & Extract from Gmail"...</div>
+    <div class="status-text" id="statusText">Select files or fetch from Gmail to begin...</div>
   </div>
 
   <div class="metrics-grid" id="metricsGrid" style="display: none;">
@@ -523,12 +522,12 @@
             <th data-key="gmailDate" style="min-width: 110px;">Gmail Date (DD/MM/YY)</th>
             <th data-key="partNo" style="min-width: 160px;">Part Number</th>
             <th data-key="desc" style="min-width: 300px;">Description</th>
-            <th data-key="qty" style="min-width: 70px;">Qty</th>
+            <th data-key="qty" style="min-width: 80px;">Qty</th>
             <th data-key="unit" style="min-width: 70px;">Unit</th>
-            <th data-key="rate" style="min-width: 95px;">Rate</th>
+            <th data-key="rate" style="min-width: 100px;">Rate</th>
             <th data-key="discountPercent" style="min-width: 110px;">Discount (%)</th>
             <th data-key="discountAmount" style="min-width: 120px;">Discount Amount</th>
-            <th data-key="amount" style="min-width: 105px;">Amount</th>
+            <th data-key="amount" style="min-width: 110px;">Amount</th>
             <th data-key="source" style="min-width: 140px;">Source File</th>
             <th class="action-col" style="width: 32px;"></th>
           </tr>
@@ -585,10 +584,10 @@
   const btnYesterday = document.getElementById('btnYesterday');
   const btnLast7 = document.getElementById('btnLast7');
 
+  // Official Gemini API Models
   const FAST_MODELS = [
-    "gemini-3.5-flash-lite",
-    "gemini-3.8-flash",
-    "gemini-3.5-flash"
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite"
   ];
 
   const BACKEND_BASE = window.location.origin;
@@ -708,16 +707,22 @@
     }
   }
 
+  // Pre-filter: Explicit non-PO filenames ko pehle hi drop karna
   function isExplicitlyNonPoFile(filename) {
     if (!filename || typeof filename !== 'string') return false;
     const lower = filename.toLowerCase();
-    const blockedTerms = ['tax invoice', 'retail invoice', 'tax_invoice', 'invoice', 'delivery challan', 'salary slip', 'receipt_'];
-    const poTerms = ['purchase', 'order', 'po', 'indent'];
+    const blockedTerms = [
+      'tax invoice', 'tax_invoice', 'retail invoice', 'commercial invoice',
+      'invoice', 'delivery challan', 'challan', 'salary slip', 'receipt',
+      'quotation', 'quote', 'estimate', 'statement', 'credit note', 'debit note'
+    ];
+    const poTerms = ['purchase order', 'purchase_order', 'po_', '_po', 'p.o.', 'work order', 'indent'];
+    
+    // Agar filename me explicitly PO likha hai toh block na karein
     if (poTerms.some(t => lower.includes(t))) return false;
     return blockedTerms.some(t => lower.includes(t));
   }
 
-  // STRICT PART NUMBER EXTRACTION (BANS ITEM CODES COMPLETELY)
   function detectAndValidatePartNumber(aiPartNo, descText) {
     function cleanCandidate(c) {
       if (!c) return "";
@@ -730,16 +735,13 @@
       if (/^(NA|N\/A|NIL|NONE|NULL|-|_|\.|\/)$/i.test(s)) return true;
       if (/^(SCHNEIDER|SIEMENS|L&T|ABB|HAVELLS|LEGRAND|OMRON|PHOENIX|WAGO|EATON|DELTA|MITSUBISHI|DANFOSS)$/i.test(s)) return true;
       if (/^(NOS|SET|PCS|EA|MTR|KG|LOT|NO|PKT|PAIR|METRE|COIL|ROLL|BAG|BOX|PACK)$/i.test(s)) return true;
-      
-      // STRICT BAN: ITEM CODES & INTERNAL ERP CODES
       if (/^(ITEM|ITM|MAT|MATERIAL|IND|CODE|SR|SL|SNO|LINE|POS|DESCR|TYPE|MAKE|BRAND|MODEL|SIZE|RATING|ART|ARTICLE)\b/i.test(s)) return true;
       if (/^ITM[0-9_-]+/i.test(s)) return true;
       if (/^MAT[0-9_-]+/i.test(s)) return true;
-      if (/^11[0-9]{5,}/.test(s)) return true; // Common internal 11-series ERP material codes
-
+      if (/^11[0-9]{5,}/.test(s)) return true;
       if (/^(\d+P|\d+A|\d+V|\d+KW|\d+HP|\d+K|\d+-WAY|\d+MM|\d+X\d+|\d+SQMM|\d+VAC|\d+VDC|\d+AMP|\d+POLE)$/i.test(s)) return true;
-      if (/^\d{6,8}$/.test(s)) return true; // HSN / SAC
-      if (/^\d{1,4}$/.test(s)) return true; // Serial numbers
+      if (/^\d{6,8}$/.test(s)) return true; // HSN codes
+      if (/^\d{1,4}$/.test(s)) return true; // Serials
       return false;
     }
 
@@ -747,42 +749,28 @@
       if (!code || isBlacklisted(code)) return false;
       const c = code.trim();
       if (c.length < 4 || c.length > 28) return false;
-
-      // Alphanumeric with symbols (e.g. 3RT2026-1BB40, LC1D25M7, 3VA1116-3ED36-0AA0)
       if (/^[A-Za-z0-9]+(?:[-/.][A-Za-z0-9]+)+$/.test(c)) return true;
-      // Letters and numbers mixed (e.g. A9F74216, LADN22)
       if (/^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9]{4,25}$/.test(c)) return true;
-      // Specific manufacturer code pattern
       if (/^[A-Z]{2,5}[0-9]{2,6}$/i.test(c)) return true;
-
       return false;
     }
 
     let colCandidate = cleanCandidate(aiPartNo);
-    if (colCandidate && isAuthenticCode(colCandidate)) {
-      return colCandidate;
-    }
+    if (colCandidate && isAuthenticCode(colCandidate)) return colCandidate;
 
-    // Secondary Check: strictly inside Description
     if (descText && typeof descText === 'string') {
       const tokens = descText.split(/[\s,;()\[\]{}|]+/);
       for (let t of tokens) {
         let cleanToken = cleanCandidate(t);
-        if (isAuthenticCode(cleanToken)) {
-          return cleanToken;
-        }
+        if (isAuthenticCode(cleanToken)) return cleanToken;
       }
     }
-
     return "";
   }
 
-  // STRICT ADDRESS SANITIZATION (BANS VENDOR ADDRESS / RUDRAPUR / PANTNAGAR VENDOR BLOCKS)
   function sanitizeBuyerAddress(rawAddress) {
     if (!rawAddress || typeof rawAddress !== 'string') return "Address on Document";
     const lower = rawAddress.toLowerCase();
-    
-    // If address contains vendor office / Classic Automation references, block it
     if (lower.includes("classic automation") || 
         (lower.includes("rudrapur") && lower.includes("sidcul") && lower.includes("khasra")) ||
         lower.includes("ward no 11") || lower.includes("kashipur bypass")) {
@@ -924,7 +912,6 @@
     let skippedCount = 0;
     let duplicateSkipped = 0;
 
-    // Har fresh fetch run par table ke existing POs note kar lein
     const tableExistingPOs = new Set();
     tableBody.querySelectorAll('tr').forEach(tr => {
       const p = tr.querySelector('input[data-key="poNo"]')?.value;
@@ -935,30 +922,31 @@
       const fileObj = fileList[f];
       const fileName = (fileObj && (fileObj.name || fileObj.filename)) ? (fileObj.name || fileObj.filename) : `Document_${f + 1}.pdf`;
 
+      // 1. Filename level check
       if (isExplicitlyNonPoFile(fileName)) {
         skippedCount++;
-        statusText.textContent = `Skipped non-order document: ${fileName}`;
+        statusText.textContent = `[Skipped Non-PO]: ${fileName}`;
         await sleep(50);
         continue;
       }
 
       const chosenApiKey = getNextApiKey(keysList);
       const keyLabel = keysList.indexOf(chosenApiKey) + 1;
-      statusText.textContent = `[Key ${keyLabel}] Analyzing [${f + 1}/${fileList.length}]: ${fileName}...`;
+      statusText.textContent = `[Key ${keyLabel}] Analyzing document content [${f + 1}/${fileList.length}]: ${fileName}...`;
 
       try {
         const extractedData = await callGeminiAIWithRetry(chosenApiKey, keysList, fileObj.base64);
 
+        // 2. Deep Content level check: If AI flags it as non-PO
         if (!extractedData || extractedData.isPurchaseOrder === false) {
           skippedCount++;
-          statusText.textContent = `Rejected (Invoice/Bill/Non-PO): ${fileName}`;
+          statusText.textContent = `[Ignored Non-PO Document]: ${fileName} (${extractedData?.documentType || 'Not a PO'})`;
           await sleep(50);
           continue;
         }
 
         const extractedPoNo = String(extractedData.poNo || "").trim().toUpperCase();
 
-        // Exact PO Duplicate Check
         if (extractedPoNo && tableExistingPOs.has(extractedPoNo)) {
           duplicateSkipped++;
           statusText.textContent = `Already in table: ${extractedPoNo}`;
@@ -996,7 +984,6 @@
           const formattedGmailDate = formatGmailDateToDDMMYY(fileObj.email_date);
           const rawDocPoDate = extractedData.poDate || "";
 
-          // Instant Live UI update
           extractedData.items.forEach(item => {
             const currentTotal = tableBody.querySelectorAll('tr').length + 1;
             newlyExtracted++;
@@ -1014,10 +1001,10 @@
               desc: item.desc || "",
               qty: item.qty || "1",
               unit: item.unit || "NOS",
-              rate: item.rate || "0",
+              rate: item.rate || "0.00",
               discountPercent: item.discountPercent || "0",
-              discountAmount: item.discountAmount || "0",
-              amount: item.amount || "0",
+              discountAmount: item.discountAmount || "0.00",
+              amount: item.amount || "0.00",
               source: fileName
             });
           });
@@ -1032,7 +1019,7 @@
             }).catch(() => {});
           }
         }
-        await sleep(600);
+        await sleep(500);
       } catch (docErr) {
         skippedCount++;
         statusText.textContent = `Error reading ${fileName}: ${docErr.message}`;
@@ -1041,7 +1028,7 @@
       }
     }
 
-    statusText.textContent = `Done! Added ${newlyExtracted} item(s). Skipped ${duplicateSkipped} duplicate(s).`;
+    statusText.textContent = `Done! Added ${newlyExtracted} item(s). Skipped ${skippedCount} non-PO file(s), ${duplicateSkipped} duplicate(s).`;
     return { newlyExtracted, skippedCount, duplicateSkipped };
   }
 
@@ -1154,42 +1141,41 @@
     let candidateKeys = [initialKey, ...allKeysList.filter(k => k !== initialKey)];
     let lastError = null;
 
-    const systemInstruction = `You are a forensic industrial procurement auditor inspecting Purchase Order documents.
-Your primary directive is ZERO-ERROR extraction of financial columns: QUANTITY, UNIT RATE, LINE AMOUNT, and PO DATE.
+    const systemInstruction = `You are an expert procurement auditor and ERP data extractor.
+Your job is to strictly analyze whether an attached document is an authentic PURCHASE ORDER, and extract line items with 100% financial accuracy.
 
 ════════════════════════════════════════════════════════════════════
-RULE 1: STRICT INVOICE & BILL REJECTION
+RULE 1: STRICT CLASSIFICATION & NON-PO REJECTION
 ════════════════════════════════════════════════════════════════════
-- If document header says "TAX INVOICE", "COMMERCIAL INVOICE", "PROFORMA INVOICE", "RETAIL INVOICE", "DELIVERY CHALLAN", "E-WAY BILL", "IRN NO":
-  -> Mark isPurchaseOrder: false immediately.
-- If it is a genuine Purchase Order / Work Order / Indent / Purchase Indent:
-  -> Set isPurchaseOrder: true.
+- Check the title, header, and watermark of the document.
+- If it is a "TAX INVOICE", "INVOICE", "PROFORMA INVOICE", "RETAIL INVOICE", "DELIVERY CHALLAN", "DISPATCH SLIP", "SALARY SLIP", "QUOTATION", "ESTIMATE", "RECEIPT", or "BANK STATEMENT":
+  -> Set "isPurchaseOrder": false
+  -> Set "documentType" to the actual type (e.g. "Tax Invoice")
+  -> Leave "items" empty: []
+- If and ONLY if it is an authentic "PURCHASE ORDER", "WORK ORDER", "PURCHASE INDENT", or "SUPPLY ORDER":
+  -> Set "isPurchaseOrder": true
+  -> Set "documentType": "Purchase Order"
 
 ════════════════════════════════════════════════════════════════════
-RULE 2: STRICT BUYER VS VENDOR SEPARATION (NEVER EXTRACT VENDOR)
+RULE 2: SEPARATION OF BUYER vs VENDOR
 ════════════════════════════════════════════════════════════════════
-- The VENDOR is "Classic Automation and Control" (located in Rudrapur/Sidcul).
-- YOU MUST NEVER EXTRACT "Classic Automation" AS BUYER!
-- YOU MUST NEVER EXTRACT THE VENDOR'S RUDRAPUR/SIDCUL ADDRESS AS BUYER ADDRESS!
-- Extract ONLY the actual CLIENT/BUYER company name (e.g. "SWG INDUSTRIES LIMITED") and THEIR registered/plant address.
+- The VENDOR/SUPPLIER is "Classic Automation and Control" (Rudrapur/Sidcul).
+- NEVER extract Classic Automation as the buyer!
+- Extract ONLY the actual client/buyer purchasing the goods and their plant/billing address.
 
 ════════════════════════════════════════════════════════════════════
-RULE 3: PART NUMBER vs ITEM CODE (STRICT BAN ON ITEM CODES)
+RULE 3: ACCURATE QUANTITY & RATE EXTRACTION (NO COLUMN CONFUSION)
 ════════════════════════════════════════════════════════════════════
-- DO NOT extract generic "Item Code", "Item No", "Material Code", "Line No", or ERP serial numbers (e.g. "ITM001", "11002345", "10", "20").
-- Extract ONLY authentic manufacturer catalog/model numbers (e.g. "LC1D25M7", "3RT2026-1BB40", "A9F74216").
-- If there is no dedicated "Part No / Cat No" column, inspect the item Description text for the catalog code.
-- If no genuine manufacturer part number is found, return strictly an empty string "".
-
-════════════════════════════════════════════════════════════════════
-RULE 4: PRECISE TABLE COLUMN ANCHORING (QUANTITY vs RATE vs AMOUNT)
-════════════════════════════════════════════════════════════════════
-1. QUANTITY ("qty"): Pure numeric quantity (e.g., "10", "2.5"). Strip "NOS", "SET".
-2. UNIT RATE ("rate"): Price of a SINGLE unit before tax and discount.
-   - ZERO-TRUNCATION: Never drop thousands zeros (e.g. "35,000" MUST BE "35000.00", NEVER "35").
-   - Strip all currency markers ("₹", "Rs.", "INR", "$").
-3. DISCOUNT ("discountPercent", "discountAmount"): Line discount if printed, else "0".
-4. LINE AMOUNT ("amount"): Basic taxable line total = (qty * rate) - discountAmount. Never PO Grand Total.`;
+In industrial PO tables:
+1. QUANTITY ("qty"): The ordered unit count (e.g. "10", "100", "2.5"). 
+   - NEVER confuse HSN/SAC (6-8 digits like 8536) or Item code with quantity!
+   - Remove text like 'NOS', 'MTR', 'KG'.
+2. UNIT RATE ("rate"): Price for ONE SINGLE unit before taxes and line discount.
+   - ZERO-TRUNCATION: Never drop zeros! (e.g. "2,500.00" must be "2500.00", NOT "2.5" or "25").
+   - NEVER extract the Line Total or Grand Total as Unit Rate.
+3. LINE AMOUNT ("amount"): The net taxable amount for this line before GST: (qty * rate) - discount.
+4. DISCOUNT: Extract percentage or absolute discount if mentioned, else "0".
+5. PART NUMBER: Authentic manufacturer catalog number (e.g. "LC1D25M7"). If absent, return "". Never return ERP codes like "ITM001".`;
 
     const jsonSchema = {
       type: "OBJECT",
@@ -1199,26 +1185,26 @@ RULE 4: PRECISE TABLE COLUMN ANCHORING (QUANTITY vs RATE vs AMOUNT)
         buyerCompanyName: { type: "STRING" },
         buyerBillingAddress: { type: "STRING" },
         poNumber: { type: "STRING" },
-        poDate: { type: "STRING", description: "Exact date of the PO as printed on the PDF document." },
+        poDate: { type: "STRING", description: "Date of PO printed on document" },
         items: {
           type: "ARRAY",
           items: {
             type: "OBJECT",
             properties: {
-              partNo: { type: "STRING", description: "Manufacturer catalog/model number from dedicated Part No column or from description. Empty string if not present. Never item codes." },
-              desc: { type: "STRING", description: "Complete item description." },
-              qty: { type: "STRING", description: "Numeric quantity only, no unit strings." },
-              unit: { type: "STRING", description: "Unit of measurement (e.g., NOS, SET, MTR, EA)." },
-              rate: { type: "STRING", description: "Single unit price before tax. Full value without dropping thousands zeros. Strictly exclude line totals." },
-              discountPercent: { type: "STRING", description: "Discount percentage or 0." },
-              discountAmount: { type: "STRING", description: "Discount value in currency or 0." },
-              amount: { type: "STRING", description: "Line item taxable total: (qty * rate) - discount. Never Grand Total." }
+              partNo: { type: "STRING" },
+              desc: { type: "STRING" },
+              qty: { type: "STRING" },
+              unit: { type: "STRING" },
+              rate: { type: "STRING" },
+              discountPercent: { type: "STRING" },
+              discountAmount: { type: "STRING" },
+              amount: { type: "STRING" }
             },
             required: ["desc", "qty", "rate", "amount"]
           }
         }
       },
-      required: ["isPurchaseOrder", "buyerCompanyName", "poNumber", "poDate", "items"]
+      required: ["isPurchaseOrder", "documentType"]
     };
 
     for (let key of candidateKeys) {
@@ -1241,7 +1227,7 @@ RULE 4: PRECISE TABLE COLUMN ANCHORING (QUANTITY vs RATE vs AMOUNT)
               },
               contents: [{
                 parts: [
-                  { text: "Extract all Purchase Order details from this attached document following the exact schema. Strictly remember Classic Automation is the vendor, NOT the buyer." },
+                  { text: "Examine this PDF document. Determine if it is a valid Purchase Order. If yes, extract buyer details and line items with strict rate, qty, and amount precision." },
                   { inline_data: { mime_type: "application/pdf", data: base64Pdf } }
                 ]
               }],
@@ -1258,18 +1244,23 @@ RULE 4: PRECISE TABLE COLUMN ANCHORING (QUANTITY vs RATE vs AMOUNT)
             const candidate = resJson.candidates?.[0]?.content?.parts?.[0]?.text;
             let data = JSON.parse(candidate || "{}");
 
+            // Agar document PO nahi hai, toh direct reject flag dekar return karein
+            if (data.isPurchaseOrder === false) {
+              return { isPurchaseOrder: false, documentType: data.documentType || "Non-PO" };
+            }
+
             return {
-              isPurchaseOrder: data.isPurchaseOrder === true,
+              isPurchaseOrder: true,
+              documentType: "Purchase Order",
               companyName: (data.buyerCompanyName || "").trim(),
               companyAddress: (data.buyerBillingAddress || "").trim(),
               poNo: (data.poNumber || "").trim(),
               poDate: (data.poDate || "").trim(),
               items: (data.items || []).map(it => {
-                // Number Sanitizer (Zero Truncation Guard)
+                // Number Sanitizer (Zero Truncation Guard & Multi-format normalization)
                 function cleanNumberString(val) {
                   if (val === undefined || val === null) return "0";
                   let str = String(val).trim();
-
                   str = str.replace(/[₹RsINR$\s/A-Za-z]/g, '');
 
                   if (str.includes(',') && str.includes('.')) {
@@ -1285,13 +1276,7 @@ RULE 4: PRECISE TABLE COLUMN ANCHORING (QUANTITY vs RATE vs AMOUNT)
                     } else {
                       str = str.replace(/,/g, '');
                     }
-                  } else if (str.includes('.')) {
-                    const dotParts = str.split('.');
-                    if (dotParts.length === 2 && dotParts[1].length === 3) {
-                      str = dotParts[0] + dotParts[1];
-                    }
                   }
-
                   str = str.replace(/[^0-9.]/g, '');
                   return str || "0";
                 }
@@ -1304,31 +1289,33 @@ RULE 4: PRECISE TABLE COLUMN ANCHORING (QUANTITY vs RATE vs AMOUNT)
 
                 if (q <= 0) q = 1;
 
-                // Truncation detection (e.g. 35000 returned as 35)
-                if (r > 0 && a >= 1000 && (a / q) >= 500) {
-                  const impliedRate = (a + da) / q;
-                  if (Math.abs(impliedRate / r - 1000) < 100 || Math.abs(impliedRate / r - 100) < 10) {
-                    r = impliedRate;
+                // Mathematical Re-anchoring & Swapped Column Detection
+                // Agar AI ne Rate aur Amount ko swap kar diya ho
+                if (r > a && a > 0 && q > 1) {
+                  const checkRate = a / q;
+                  if (Math.abs(checkRate * q - a) < 0.05) {
+                    const temp = r;
+                    r = checkRate;
+                    a = temp;
                   }
                 }
 
-                // If Rate is missing but Amount present
+                // Agar Rate missing ho par Amount ho
                 if (r === 0 && a > 0) {
                   r = (a + da) / q;
                 }
 
-                // Discount calculation
-                if (dp > 0 && da === 0 && r > 0) {
-                  da = (q * r * dp) / 100;
+                // Agar Amount 0 ho par Rate aur Qty available ho
+                if (a === 0 && r > 0) {
+                  if (dp > 0 && da === 0) da = (q * r * dp) / 100;
+                  a = Math.max(0, (q * r) - da);
                 }
 
-                // Total Amount check
-                const expectedAmt = (q * r) - da;
-                if (a === 0 && r > 0) {
-                  a = Math.max(0, expectedAmt);
-                } else if (a > 0 && r > 0) {
-                  if (Math.abs(a - expectedAmt) > (expectedAmt * 0.4) && expectedAmt > 0) {
-                    a = expectedAmt;
+                // Zero Truncation Recovery (e.g. 1500 returned as 15 or 1.5)
+                if (r > 0 && a > 0 && q > 0) {
+                  const expectedRate = (a + da) / q;
+                  if (Math.abs((expectedRate / r) - 1000) < 50 || Math.abs((expectedRate / r) - 100) < 5) {
+                    r = expectedRate;
                   }
                 }
 
@@ -1339,7 +1326,7 @@ RULE 4: PRECISE TABLE COLUMN ANCHORING (QUANTITY vs RATE vs AMOUNT)
                   unit: (it.unit || "NOS").trim().toUpperCase(),
                   rate: r.toFixed(2),
                   discountPercent: dp > 0 ? dp.toString() : "0",
-                  discountAmount: da > 0 ? da.toFixed(2) : "0",
+                  discountAmount: da > 0 ? da.toFixed(2) : "0.00",
                   amount: a.toFixed(2)
                 };
               })
@@ -1351,16 +1338,16 @@ RULE 4: PRECISE TABLE COLUMN ANCHORING (QUANTITY vs RATE vs AMOUNT)
 
           if (response.status === 429) {
             if (candidateKeys.length > 1 && key === candidateKeys[0]) {
-              statusText.textContent = `⚡ Key 1 rate limit reached. Auto-switching to Key 2 immediately...`;
+              statusText.textContent = `⚡ Key 1 rate limit hit. Switching to Key 2...`;
               break; 
             } else {
-              await countdownWait(15, "Rate limit reached on available keys");
+              await countdownWait(12, "Rate limit reached on keys");
               continue;
             }
           }
 
           if (response.status === 400 || response.status === 403) {
-            throw new Error(`Google API Authentication Error (${response.status}): ${errMsg}. Make sure your key starts with 'AIzaSy'.`);
+            throw new Error(`Google API Authentication Error (${response.status}): ${errMsg}`);
           }
 
           lastError = errMsg;
