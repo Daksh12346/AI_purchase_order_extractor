@@ -431,7 +431,6 @@
       background: #ffebee;
     }
 
-    /* NEW: debug log panel */
     .debug-panel {
       background: #111827;
       color: #D1FAE5;
@@ -625,7 +624,6 @@
   const btnYesterday = document.getElementById('btnYesterday');
   const btnLast7 = document.getElementById('btnLast7');
 
-  // NEW: debug panel elements
   const debugPanel = document.getElementById('debugPanel');
   const toggleDebugBtn = document.getElementById('toggleDebugBtn');
   toggleDebugBtn.addEventListener('click', () => {
@@ -633,7 +631,6 @@
     toggleDebugBtn.textContent = debugPanel.classList.contains('show') ? '🐞 Hide Debug Log' : '🐞 Show Debug Log';
   });
 
-  // NEW: logs to both the on-screen panel AND the browser console (F12)
   function debugLog(message, isError = false) {
     console[isError ? 'error' : 'log'](message);
     const line = document.createElement('div');
@@ -651,9 +648,10 @@
   let isLiveProcessing = false;
   let abortRequested = false;
 
+  // Active production endpoints
   const FAST_MODELS = [
-    "gemini-3.6-flash",
-    "gemini-3.5-flash-lite"
+    "gemini-3.0-flash",
+    "gemini-3.5-flash"
   ];
 
   const BACKEND_BASE = window.location.origin;
@@ -1043,7 +1041,7 @@
             skippedCount++;
             processedTotal++;
             statusText.textContent = `[${processedTotal}/${fileList.length}] Skipped Non-PO / No items: ${fileName}`;
-            debugLog(`Gemini says NOT a PO / no items: ${fileName}`, true);
+            debugLog(`Gemini identified as NOT a PO / no items: ${fileName}`, true);
             continue;
           }
 
@@ -1088,7 +1086,6 @@
             const formattedGmailDate = formatGmailDateToDDMMYY(fileObj.email_date);
             const rawDocPoDate = extractedData.poDate || "";
 
-            // TURANT LIVE TABLE ROW APPEND
             items.forEach(item => {
               const currentTotal = tableBody.querySelectorAll('tr').length + 1;
               newlyExtracted++;
@@ -1133,7 +1130,7 @@
             }
           } else {
             skippedCount++;
-            debugLog(`Gemini returned isPurchaseOrder=true but ZERO items for: ${fileName}`, true);
+            debugLog(`Gemini returned isPurchaseOrder=true but 0 items for: ${fileName}`, true);
           }
           processedTotal++;
         } catch (docErr) {
@@ -1321,13 +1318,14 @@ RULES:
         if (abortRequested) throw new Error("Operation cancelled by user.");
 
         const cleanModel = rawModel.replace(/^models\//, "");
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent?key=${cleanKey}`;
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent`;
 
         try {
           const response = await fetch(url, {
             method: "POST",
             headers: {
-              "Content-Type": "application/json"
+              "Content-Type": "application/json",
+              "x-goog-api-key": cleanKey
             },
             body: JSON.stringify({
               system_instruction: {
@@ -1343,8 +1341,7 @@ RULES:
               generationConfig: {
                 response_mime_type: "application/json",
                 response_schema: jsonSchema,
-                temperature: 0.1,
-                thinkingConfig: { thinkingBudget: 0 }
+                temperature: 0.1
               }
             })
           });
@@ -1352,45 +1349,31 @@ RULES:
           if (response.ok) {
             const resJson = await response.json();
 
-            // NEW: catch Gemini's "safety block" / empty-candidate case explicitly
             if (!resJson.candidates || resJson.candidates.length === 0) {
-              const blockReason = resJson.promptFeedback?.blockReason || "unknown (no candidates returned)";
-              debugLog(`Gemini returned NO candidates for this file. blockReason=${blockReason}`, true);
+              const blockReason = resJson.promptFeedback?.blockReason || "unknown";
+              debugLog(`Gemini returned NO candidates. blockReason=${blockReason}`, true);
               lastError = `No candidates returned (blockReason: ${blockReason})`;
               continue;
             }
 
             let candidateText = resJson.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
-
-            // Markdown fences safai (agar model ```json include kare)
             candidateText = candidateText.replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim();
-
-            // NEW: agar thinking/reasoning text kisi tarah leak ho jaaye JSON string field ke andar
-            // (e.g. "WAIT, THE VALUE IS...") toh use catch karke us field ko blank kar do
-            // taaki garbage table mein na jaaye.
-            const looksLikeLeakedThinking = /\bWAIT,?\b|\bI SHOULDN'T\b|\bLET'S\b|THOUGHT PROCESS/i.test(candidateText);
-            if (looksLikeLeakedThinking) {
-              debugLog(`Detected leaked reasoning text in model output for this file — response was rejected as unreliable.`, true);
-              lastError = "Model leaked reasoning text into JSON output (thinking not fully disabled).";
-              continue;
-            }
 
             let data = {};
             try {
               data = JSON.parse(candidateText);
             } catch (e) {
-              // Regex fallback agar JSON slightly truncated ho
               const match = candidateText.match(/\{[\s\S]*\}/);
               if (match) {
                 try {
                   data = JSON.parse(match[0]);
                 } catch (e2) {
-                  debugLog(`JSON parse failed even with fallback regex. Raw text: ${candidateText.slice(0, 300)}`, true);
+                  debugLog(`JSON parse failed. Raw: ${candidateText.slice(0, 300)}`, true);
                   lastError = "Model returned malformed JSON.";
                   continue;
                 }
               } else {
-                debugLog(`Model response was not JSON at all. Raw text: ${candidateText.slice(0, 300)}`, true);
+                debugLog(`Model response was not JSON: ${candidateText.slice(0, 300)}`, true);
                 lastError = "Model returned non-JSON text.";
                 continue;
               }
@@ -1462,7 +1445,7 @@ RULES:
               statusText.textContent = `⚡ Key 1 limit reached. Switching to Key 2...`;
               break;
             } else {
-              await countdownWait(10, "Rate limit reached on keys");
+              await countdownWait(15, "Rate limit hit across keys");
               continue;
             }
           }
