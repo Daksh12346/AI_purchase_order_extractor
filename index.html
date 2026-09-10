@@ -1447,7 +1447,7 @@ RULES:
               statusText.textContent = `⚡ Key 1 limit reached. Switching to Key 2...`;
               break;
             } else {
-              await countdownWait(15, "Rate limit hit across keys");
+              await countdownWait(5, "Rate limit hit across keys");
               continue;
             }
           }
