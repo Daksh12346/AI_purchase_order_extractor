@@ -26,7 +26,7 @@
     }
 
     .container {
-      max-width: 1650px;
+      max-width: 1680px;
       margin: 0 auto;
     }
 
@@ -418,7 +418,7 @@
 <div class="container">
   <div class="header-box">
     <h1>AI Purchase Order Extractor</h1>
-    <p class="subtitle">Industrial Procurement Engine (Anti-Truncation Rate & Exact Part No Parsing)</p>
+    <p class="subtitle">Complete Procurement System (Zero Truncation, Exact Math, Buyer-Only Address)</p>
 
     <!-- 2 USER-INPUT API KEY BOXES -->
     <div class="api-key-container">
@@ -717,7 +717,7 @@
     return blockedTerms.some(t => lower.includes(t));
   }
 
-  // ROBUST INDUSTRIAL PART NUMBER EXTRACTION
+  // STRICT PART NUMBER EXTRACTION (BANS ITEM CODES COMPLETELY)
   function detectAndValidatePartNumber(aiPartNo, descText) {
     function cleanCandidate(c) {
       if (!c) return "";
@@ -730,9 +730,15 @@
       if (/^(NA|N\/A|NIL|NONE|NULL|-|_|\.|\/)$/i.test(s)) return true;
       if (/^(SCHNEIDER|SIEMENS|L&T|ABB|HAVELLS|LEGRAND|OMRON|PHOENIX|WAGO|EATON|DELTA|MITSUBISHI|DANFOSS)$/i.test(s)) return true;
       if (/^(NOS|SET|PCS|EA|MTR|KG|LOT|NO|PKT|PAIR|METRE|COIL|ROLL|BAG|BOX|PACK)$/i.test(s)) return true;
-      if (/^(ITEM|ITM|MAT|IND|CODE|SR|SL|SNO|LINE|POS|DESCR|TYPE|MAKE|BRAND|MODEL|SIZE|RATING)\b/i.test(s)) return true;
+      
+      // STRICT BAN: ITEM CODES & INTERNAL ERP CODES
+      if (/^(ITEM|ITM|MAT|MATERIAL|IND|CODE|SR|SL|SNO|LINE|POS|DESCR|TYPE|MAKE|BRAND|MODEL|SIZE|RATING|ART|ARTICLE)\b/i.test(s)) return true;
+      if (/^ITM[0-9_-]+/i.test(s)) return true;
+      if (/^MAT[0-9_-]+/i.test(s)) return true;
+      if (/^11[0-9]{5,}/.test(s)) return true; // Common internal 11-series ERP material codes
+
       if (/^(\d+P|\d+A|\d+V|\d+KW|\d+HP|\d+K|\d+-WAY|\d+MM|\d+X\d+|\d+SQMM|\d+VAC|\d+VDC|\d+AMP|\d+POLE)$/i.test(s)) return true;
-      if (/^\d{6,8}$/.test(s)) return true; // Pure HSN/SAC Code
+      if (/^\d{6,8}$/.test(s)) return true; // HSN / SAC
       if (/^\d{1,4}$/.test(s)) return true; // Serial numbers
       return false;
     }
@@ -742,11 +748,11 @@
       const c = code.trim();
       if (c.length < 4 || c.length > 28) return false;
 
-      // Pattern 1: Alphanumeric standard codes with hyphens/dots (e.g. 3RT2026-1BB40, 3VA1116-3ED36-0AA0)
+      // Alphanumeric with symbols (e.g. 3RT2026-1BB40, LC1D25M7, 3VA1116-3ED36-0AA0)
       if (/^[A-Za-z0-9]+(?:[-/.][A-Za-z0-9]+)+$/.test(c)) return true;
-      // Pattern 2: Contains letters and numbers mixed (e.g. LC1D25M7, A9F74216, LADN22)
+      // Letters and numbers mixed (e.g. A9F74216, LADN22)
       if (/^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9]{4,25}$/.test(c)) return true;
-      // Pattern 3: Standard 5-9 alphanumeric prefix catalog models
+      // Specific manufacturer code pattern
       if (/^[A-Z]{2,5}[0-9]{2,6}$/i.test(c)) return true;
 
       return false;
@@ -757,6 +763,7 @@
       return colCandidate;
     }
 
+    // Secondary Check: strictly inside Description
     if (descText && typeof descText === 'string') {
       const tokens = descText.split(/[\s,;()\[\]{}|]+/);
       for (let t of tokens) {
@@ -768,6 +775,20 @@
     }
 
     return "";
+  }
+
+  // STRICT ADDRESS SANITIZATION (BANS VENDOR ADDRESS / RUDRAPUR / PANTNAGAR VENDOR BLOCKS)
+  function sanitizeBuyerAddress(rawAddress) {
+    if (!rawAddress || typeof rawAddress !== 'string') return "Address on Document";
+    const lower = rawAddress.toLowerCase();
+    
+    // If address contains vendor office / Classic Automation references, block it
+    if (lower.includes("classic automation") || 
+        (lower.includes("rudrapur") && lower.includes("sidcul") && lower.includes("khasra")) ||
+        lower.includes("ward no 11") || lower.includes("kashipur bypass")) {
+      return "Registered Plant Address";
+    }
+    return rawAddress.trim() || "Registered Plant Address";
   }
 
   function parseFlexibleDate(dateStr) {
@@ -811,23 +832,15 @@
     };
   }
 
-  function getTableExistingPoNumbers() {
-    const existing = new Set();
-    tableBody.querySelectorAll('tr').forEach(tr => {
-      const poVal = tr.querySelector('input[data-key="poNo"]')?.value;
-      if (poVal && typeof poVal === 'string' && poVal.trim()) {
-        existing.add(poVal.trim().toUpperCase());
-      }
-    });
-    return existing;
-  }
-
   function updateNumbersAndCount() {
     const allRows = Array.from(tableBody.querySelectorAll('tr'));
     
     if (allRows.length === 0) {
       tableBox.style.display = 'none';
       metricsGrid.style.display = 'none';
+      totalPosCount.textContent = '0';
+      totalItemsCount.textContent = '0';
+      totalValueCount.textContent = '0.00';
       return;
     }
 
@@ -876,7 +889,7 @@
       if (visible) {
         tr.style.display = '';
         visibleCount++;
-        if (poVal.trim()) poSet.add(poVal.trim());
+        if (poVal.trim()) poSet.add(poVal.trim().toUpperCase());
         totalValue += amtVal;
 
         const sno = tr.querySelector('.sno-input');
@@ -910,7 +923,13 @@
     let newlyExtracted = 0;
     let skippedCount = 0;
     let duplicateSkipped = 0;
-    const displayedPOs = getTableExistingPoNumbers();
+
+    // Har fresh fetch run par table ke existing POs note kar lein
+    const tableExistingPOs = new Set();
+    tableBody.querySelectorAll('tr').forEach(tr => {
+      const p = tr.querySelector('input[data-key="poNo"]')?.value;
+      if (p && p.trim()) tableExistingPOs.add(p.trim().toUpperCase());
+    });
 
     for (let f = 0; f < fileList.length; f++) {
       const fileObj = fileList[f];
@@ -932,30 +951,31 @@
 
         if (!extractedData || extractedData.isPurchaseOrder === false) {
           skippedCount++;
-          statusText.textContent = `Rejected (Bill / Non-PO): ${fileName}`;
+          statusText.textContent = `Rejected (Invoice/Bill/Non-PO): ${fileName}`;
           await sleep(50);
           continue;
         }
 
         const extractedPoNo = String(extractedData.poNo || "").trim().toUpperCase();
 
-        if (extractedPoNo && displayedPOs.has(extractedPoNo)) {
+        // Exact PO Duplicate Check
+        if (extractedPoNo && tableExistingPOs.has(extractedPoNo)) {
           duplicateSkipped++;
-          statusText.textContent = `Already displayed: ${extractedPoNo}`;
+          statusText.textContent = `Already in table: ${extractedPoNo}`;
           await sleep(50);
           continue;
         }
 
         if (!forceReprocess && extractedPoNo && alreadyProcessedSet.has(extractedPoNo)) {
           duplicateSkipped++;
-          statusText.textContent = `Skipping saved PO: ${extractedPoNo}`;
+          statusText.textContent = `Previously saved PO: ${extractedPoNo}`;
           await sleep(50);
           continue;
         }
 
         if (extractedData && Array.isArray(extractedData.items) && extractedData.items.length > 0) {
           let resolvedCompany = String(extractedData.companyName || "").trim();
-          let resolvedAddress = String(extractedData.companyAddress || "").trim();
+          let resolvedAddress = sanitizeBuyerAddress(extractedData.companyAddress);
 
           if (resolvedCompany.toLowerCase().includes("classic automation")) {
             resolvedCompany = "";
@@ -970,7 +990,7 @@
           }
 
           if (extractedPoNo) {
-            displayedPOs.add(extractedPoNo);
+            tableExistingPOs.add(extractedPoNo);
           }
 
           const formattedGmailDate = formatGmailDateToDDMMYY(fileObj.email_date);
@@ -986,7 +1006,7 @@
             addRowToTable({
               sNo: currentTotal,
               company: resolvedCompany,
-              address: resolvedAddress || "Not Specified",
+              address: resolvedAddress,
               poNo: extractedData.poNo || "N/A",
               poDate: rawDocPoDate,
               gmailDate: formattedGmailDate,
@@ -1012,7 +1032,7 @@
             }).catch(() => {});
           }
         }
-        await sleep(1000);
+        await sleep(600);
       } catch (docErr) {
         skippedCount++;
         statusText.textContent = `Error reading ${fileName}: ${docErr.message}`;
@@ -1140,42 +1160,35 @@ Your primary directive is ZERO-ERROR extraction of financial columns: QUANTITY, 
 ════════════════════════════════════════════════════════════════════
 RULE 1: STRICT INVOICE & BILL REJECTION
 ════════════════════════════════════════════════════════════════════
-- If document header has "TAX INVOICE", "COMMERCIAL INVOICE", "PROFORMA INVOICE", "RETAIL INVOICE", "DELIVERY CHALLAN", "E-WAY BILL", "IRN NO":
+- If document header says "TAX INVOICE", "COMMERCIAL INVOICE", "PROFORMA INVOICE", "RETAIL INVOICE", "DELIVERY CHALLAN", "E-WAY BILL", "IRN NO":
   -> Mark isPurchaseOrder: false immediately.
+- If it is a genuine Purchase Order / Work Order / Indent / Purchase Indent:
+  -> Set isPurchaseOrder: true.
 
 ════════════════════════════════════════════════════════════════════
-RULE 2: BUYER vs VENDOR DISTINCTION
+RULE 2: STRICT BUYER VS VENDOR SEPARATION (NEVER EXTRACT VENDOR)
 ════════════════════════════════════════════════════════════════════
-- Buyer: The customer issuing the order and paying money. Look at letterhead/logo or under "Bill To:", "Buyer:".
-- Supplier/Vendor: The entity fulfilling the order. NEVER output Classic Automation as the buyer.
+- The VENDOR is "Classic Automation and Control" (located in Rudrapur/Sidcul).
+- YOU MUST NEVER EXTRACT "Classic Automation" AS BUYER!
+- YOU MUST NEVER EXTRACT THE VENDOR'S RUDRAPUR/SIDCUL ADDRESS AS BUYER ADDRESS!
+- Extract ONLY the actual CLIENT/BUYER company name (e.g. "SWG INDUSTRIES LIMITED") and THEIR registered/plant address.
 
 ════════════════════════════════════════════════════════════════════
-RULE 3: PO DATE (PDF DOCUMENT DATE)
+RULE 3: PART NUMBER vs ITEM CODE (STRICT BAN ON ITEM CODES)
 ════════════════════════════════════════════════════════════════════
-- Under poDate, extract the EXACT date printed on the Purchase Order document next to labels like "PO Date:", "Order Date:", "Date:".
-- Output the date EXACTLY AS PRINTED in the PDF without converting (e.g. "15.08.2026", "22-Jul-2026").
+- DO NOT extract generic "Item Code", "Item No", "Material Code", "Line No", or ERP serial numbers (e.g. "ITM001", "11002345", "10", "20").
+- Extract ONLY authentic manufacturer catalog/model numbers (e.g. "LC1D25M7", "3RT2026-1BB40", "A9F74216").
+- If there is no dedicated "Part No / Cat No" column, inspect the item Description text for the catalog code.
+- If no genuine manufacturer part number is found, return strictly an empty string "".
 
 ════════════════════════════════════════════════════════════════════
-RULE 4: PART NUMBER EXTRACTION
+RULE 4: PRECISE TABLE COLUMN ANCHORING (QUANTITY vs RATE vs AMOUNT)
 ════════════════════════════════════════════════════════════════════
-The manufacturer Part Number / Catalog Number / Model Number exists ONLY in two possible places:
-1. Under a dedicated table column named: "Part No", "Catalog No", "Cat No", "Model No", "Item Code".
-2. OR embedded directly inside the "Item Description" text of that specific item line.
-- Return the exact catalog code (e.g. "LC1D25M7", "3RT2026-1BB40", "A9F74216").
-- If neither contains an authentic manufacturer part code, RETURN STRICTLY AN EMPTY STRING "".
-- NEVER extract HSN codes (e.g. 85362030) or line numbers (e.g. 1, 2, 10).
-
-════════════════════════════════════════════════════════════════════
-RULE 5: PRECISE TABLE COLUMN ANCHORING (QUANTITY vs RATE vs AMOUNT)
-════════════════════════════════════════════════════════════════════
-1. QUANTITY ("qty"): Numeric value only (e.g., "10", "2.5"). Strip "NOS", "SET".
+1. QUANTITY ("qty"): Pure numeric quantity (e.g., "10", "2.5"). Strip "NOS", "SET".
 2. UNIT RATE ("rate"): Price of a SINGLE unit before tax and discount.
-   - Column labels: "Unit Rate", "Rate", "Basic Price", "Price/Unit", "Unit Price".
-   - CRITICAL ZERO-TRUNCATION WARNING: Read numbers carefully without dropping thousands zeroes!
-     * Example: "35,000/-" or "35000.00" MUST BE extracted as "35000.00". NEVER output "35" or "35.00"!
-     * Do NOT convert Indian comma formatting incorrectly.
-   - CRITICAL: Do NOT copy the Line Total / Amount in the Rate! Clean number only.
-3. DISCOUNT ("discountPercent", "discountAmount"): Explicit line discount if printed, else "0".
+   - ZERO-TRUNCATION: Never drop thousands zeros (e.g. "35,000" MUST BE "35000.00", NEVER "35").
+   - Strip all currency markers ("₹", "Rs.", "INR", "$").
+3. DISCOUNT ("discountPercent", "discountAmount"): Line discount if printed, else "0".
 4. LINE AMOUNT ("amount"): Basic taxable line total = (qty * rate) - discountAmount. Never PO Grand Total.`;
 
     const jsonSchema = {
@@ -1192,7 +1205,7 @@ RULE 5: PRECISE TABLE COLUMN ANCHORING (QUANTITY vs RATE vs AMOUNT)
           items: {
             type: "OBJECT",
             properties: {
-              partNo: { type: "STRING", description: "Manufacturer catalog/model number from dedicated column or description. Empty string if not present." },
+              partNo: { type: "STRING", description: "Manufacturer catalog/model number from dedicated Part No column or from description. Empty string if not present. Never item codes." },
               desc: { type: "STRING", description: "Complete item description." },
               qty: { type: "STRING", description: "Numeric quantity only, no unit strings." },
               unit: { type: "STRING", description: "Unit of measurement (e.g., NOS, SET, MTR, EA)." },
@@ -1252,15 +1265,13 @@ RULE 5: PRECISE TABLE COLUMN ANCHORING (QUANTITY vs RATE vs AMOUNT)
               poNo: (data.poNumber || "").trim(),
               poDate: (data.poDate || "").trim(),
               items: (data.items || []).map(it => {
-                // ROBUST NUMERIC SANITIZER (Completely prevents 35000 from turning into 35)
+                // Number Sanitizer (Zero Truncation Guard)
                 function cleanNumberString(val) {
                   if (val === undefined || val === null) return "0";
                   let str = String(val).trim();
 
-                  // Remove currency symbols, units, spaces
                   str = str.replace(/[₹RsINR$\s/A-Za-z]/g, '');
 
-                  // Agar comma aur dot dono hain (e.g. 35,000.00)
                   if (str.includes(',') && str.includes('.')) {
                     if (str.lastIndexOf('.') > str.lastIndexOf(',')) {
                       str = str.replace(/,/g, '');
@@ -1268,7 +1279,6 @@ RULE 5: PRECISE TABLE COLUMN ANCHORING (QUANTITY vs RATE vs AMOUNT)
                       str = str.replace(/\./g, '').replace(',', '.');
                     }
                   } else if (str.includes(',')) {
-                    // Agar sirf comma hai: 35,000 -> 35000
                     const commaParts = str.split(',');
                     if (commaParts.length === 2 && commaParts[1].length === 2) {
                       str = commaParts[0] + '.' + commaParts[1];
@@ -1276,7 +1286,6 @@ RULE 5: PRECISE TABLE COLUMN ANCHORING (QUANTITY vs RATE vs AMOUNT)
                       str = str.replace(/,/g, '');
                     }
                   } else if (str.includes('.')) {
-                    // Agar dot thousands separator ki tarah use hua ho: 35.000 -> 35000
                     const dotParts = str.split('.');
                     if (dotParts.length === 2 && dotParts[1].length === 3) {
                       str = dotParts[0] + dotParts[1];
@@ -1295,7 +1304,7 @@ RULE 5: PRECISE TABLE COLUMN ANCHORING (QUANTITY vs RATE vs AMOUNT)
 
                 if (q <= 0) q = 1;
 
-                // 1. Thousand Truncation Guard: (Fixes 35000 extracted as 35)
+                // Truncation detection (e.g. 35000 returned as 35)
                 if (r > 0 && a >= 1000 && (a / q) >= 500) {
                   const impliedRate = (a + da) / q;
                   if (Math.abs(impliedRate / r - 1000) < 100 || Math.abs(impliedRate / r - 100) < 10) {
@@ -1303,17 +1312,17 @@ RULE 5: PRECISE TABLE COLUMN ANCHORING (QUANTITY vs RATE vs AMOUNT)
                   }
                 }
 
-                // 2. Missing Rate recovery
+                // If Rate is missing but Amount present
                 if (r === 0 && a > 0) {
                   r = (a + da) / q;
                 }
 
-                // 3. Discount calculation
+                // Discount calculation
                 if (dp > 0 && da === 0 && r > 0) {
                   da = (q * r * dp) / 100;
                 }
 
-                // 4. Rate x Qty vs Amount validation
+                // Total Amount check
                 const expectedAmt = (q * r) - da;
                 if (a === 0 && r > 0) {
                   a = Math.max(0, expectedAmt);
@@ -1351,7 +1360,7 @@ RULE 5: PRECISE TABLE COLUMN ANCHORING (QUANTITY vs RATE vs AMOUNT)
           }
 
           if (response.status === 400 || response.status === 403) {
-            throw new Error(`Google API Authentication Error (${response.status}): ${errMsg}. Make sure your key is valid and starts with 'AIzaSy' from Google AI Studio.`);
+            throw new Error(`Google API Authentication Error (${response.status}): ${errMsg}. Make sure your key starts with 'AIzaSy'.`);
           }
 
           lastError = errMsg;
