@@ -918,18 +918,11 @@
       const p = tr.querySelector('input[data-key="poNo"]')?.value;
       if (p && p.trim()) tableExistingPOs.add(p.trim().toUpperCase());
     });
-
-    for (let f = 0; f < fileList.length; f++) {
-      const fileObj = fileList[f];
-      const fileName = (fileObj && (fileObj.name || fileObj.filename)) ? (fileObj.name || fileObj.filename) : `Document_${f + 1}.pdf`;
-
-      // 1. Filename level check
-      if (isExplicitlyNonPoFile(fileName)) {
-        skippedCount++;
-        statusText.textContent = `[Skipped Non-PO]: ${fileName}`;
-        await sleep(50);
-        continue;
-      }
+for (let f = 0; f < fileList.length; f++) {
+  // Ek file upload hoti hai -> AI ko bhejte hain -> 5-10 second wait karte hain -> fir sleep karte hain -> fir next file!
+  await callGeminiAIWithRetry(...);
+  await sleep(500);
+}
 
       const chosenApiKey = getNextApiKey(keysList);
       const keyLabel = keysList.indexOf(chosenApiKey) + 1;
