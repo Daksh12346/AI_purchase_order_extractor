@@ -1086,32 +1086,45 @@
     let candidateKeys = [initialKey, ...allKeysList.filter(k => k !== initialKey)];
     let lastError = null;
 
-    const systemInstruction = `You are a zero-tolerance industrial procurement auditor.
-Carefully review the PDF document page-by-page.
+const systemInstruction = `You are a forensic industrial procurement auditor inspecting Purchase Order documents.
+Your primary directive is ZERO-ERROR extraction of financial columns: QUANTITY, UNIT RATE, and LINE AMOUNT.
 
+════════════════════════════════════════════════════════════════════
 RULE 1: STRICT INVOICE & BILL REJECTION
-- If the document contains any of the following titles:
-  "TAX INVOICE", "INVOICE", "COMMERCIAL INVOICE", "PROFORMA INVOICE", "RETAIL INVOICE",
-  "DELIVERY CHALLAN", "E-WAY BILL", "IRN NO", "BILL OF SUPPLY", "PAYMENT VOUCHER"
-  -> THIS IS A BILL/INVOICE, NOT A PURCHASE ORDER!
-  -> Even if it mentions "Buyer PO Ref" or "Against PO No.", set isPurchaseOrder: false immediately.
+════════════════════════════════════════════════════════════════════
+- If document header has "TAX INVOICE", "COMMERCIAL INVOICE", "PROFORMA INVOICE", "RETAIL INVOICE", "DELIVERY CHALLAN", "E-WAY BILL", "IRN NO":
+  -> Mark isPurchaseOrder: false immediately.
 
-RULE 2: STRICT BUYER VS VENDOR EXTRACTION
-- Under buyerCompanyName, output ONLY the BUYER organization. NEVER output Classic Automation or the vendor name.
-- Under buyerBillingAddress, output the registered/billing plant address of that BUYER company.
+════════════════════════════════════════════════════════════════════
+RULE 2: BUYER vs VENDOR DISTINCTION
+════════════════════════════════════════════════════════════════════
+- Buyer: The customer issuing the order and paying money. Look at letterhead/logo or under "Bill To:", "Buyer:".
+- Supplier/Vendor: The entity fulfilling the order. NEVER output Classic Automation as the buyer.
 
-RULE 3: PO NUMBER EXTRACTION
-- Extract the PO Number / Order Number / Indent Number written next to labels like "P.O. No.", "Order Ref:", "PO #", "SAP PO:".
-- Capture complete numbers (e.g. 4510066200, 0630032011).
-- Do NOT confuse GSTIN (15 characters) or Vendor Code with PO Number.
+════════════════════════════════════════════════════════════════════
+RULE 3: PRECISE TABLE COLUMN ANCHORING (QUANTITY vs RATE vs AMOUNT)
+════════════════════════════════════════════════════════════════════
+Inspect the table structure vertically under the header labels:
 
-RULE 4: MATHEMATICAL PRECISION FOR LINE ITEM AMOUNTS
-- "partNo": Genuine manufacturer part/catalogue number. Blank string "" if not printed.
-- "qty": Pure numeric quantity (e.g., "10", "2").
-- "rate": Unit price before tax. Clean numbers only.
-- "discountPercent": Explicit discount percentage if written, else "0".
-- "discountAmount": Explicit discount value if written, else "0".
-- "amount": The exact BASIC line total = (qty * rate) - discountAmount. Never output Grand Total as line amount.`;
+1. QUANTITY ("qty"):
+   - Column labels: "Qty", "Quantity", "PO Qty", "Order Qty".
+   - Extract strictly the numeric value (e.g., "10", "2.5", "100").
+   - NEVER include unit descriptions here (strip "NOS", "SET", "MTR").
+
+2. UNIT RATE ("rate"):
+   - Column labels: "Unit Rate", "Rate", "Basic Price", "Unit Price", "Price/Unit".
+   - This is strictly the PRICE OF A SINGLE UNIT before tax/discount.
+   - FATAL ERROR WARNING: DO NOT copy the Line Amount / Net Total into the Rate!
+   - Example: If Qty is 10 and Net Total is 50,000, the Rate is 5000 (NOT 50,000).
+   - Strip all currency markers ("₹", "Rs.", "INR", "$") and commas. Pure number only (e.g. "5000.00").
+
+3. DISCOUNT ("discountPercent", "discountAmount"):
+   - If a line-item discount is explicitly printed, extract it. Otherwise return "0".
+
+4. LINE AMOUNT ("amount"):
+   - Column labels: "Amount", "Basic Amount", "Taxable Value", "Net Amount", "Total (INR)".
+   - Mathematical formula: amount = (qty * rate) - discountAmount.
+   - NEVER output the PO Grand Total / Final Invoice Value as the line amount.`;
 
     const jsonSchema = {
       type: "OBJECT",
@@ -1122,27 +1135,69 @@ RULE 4: MATHEMATICAL PRECISION FOR LINE ITEM AMOUNTS
         buyerBillingAddress: { type: "STRING" },
         poNumber: { type: "STRING" },
         poDate: { type: "STRING" },
-        items: {
-          type: "ARRAY",
-          items: {
-            type: "OBJECT",
-            properties: {
-              partNo: { type: "STRING", description: "Manufacturer part number. Blank string if not present." },
-              desc: { type: "STRING" },
-              qty: { type: "STRING" },
-              unit: { type: "STRING" },
-              rate: { type: "STRING" },
-              discountPercent: { type: "STRING" },
-              discountAmount: { type: "STRING" },
-              amount: { type: "STRING" }
-            },
+     items: (data.items || []).map(it => {
+              // 1. Raw string cleanup (Commas, currency signs, spaces remove)
+              let rawQty = String(it.qty || "1").replace(/[^0-9.]/g, '') || "1";
+              let rawRate = String(it.rate || "0").replace(/[^0-9.]/g, '') || "0";
+              let rawDiscPct = String(it.discountPercent || "0").replace(/[^0-9.]/g, '') || "0";
+              let rawDiscAmt = String(it.discountAmount || "0").replace(/[^0-9.]/g, '') || "0";
+              let rawAmt = String(it.amount || "0").replace(/[^0-9.]/g, '') || "0";
+
+              let q = parseFloat(rawQty) || 1;
+              let r = parseFloat(rawRate) || 0;
+              let dp = parseFloat(rawDiscPct) || 0;
+              let da = parseFloat(rawDiscAmt) || 0;
+              let a = parseFloat(rawAmt) || 0;
+
+              // 2. Quantity Sanity Check (Quantity cannot be 0)
+              if (q <= 0) q = 1;
+
+              // 3. Discount calculation
+              if (dp > 0 && da === 0 && r > 0) {
+                da = (q * r * dp) / 100;
+              }
+
+              // 4. CROSS-CHECK 1: Column Swap Check (Rate me Line Total ghus gaya ho)
+              // Example: Qty = 5, Rate = 25000, Amount = 25000 -> Rate must be 5000
+              if (q > 1 && a > 0 && Math.abs(r - a) < 0.05) {
+                r = a / q;
+              }
+
+              // 5. CROSS-CHECK 2: Missing Rate recovery
+              if (r === 0 && a > 0 && q > 0) {
+                r = (a + da) / q;
+              }
+
+              // 6. CROSS-CHECK 3: Mathematical Reconciliation
+              // Expected line total = (Qty * Rate) - Discount
+              const expectedAmt = (q * r) - da;
+
+              if (a === 0 && r > 0) {
+                a = Math.max(0, expectedAmt);
+              } else if (a > 0 && r > 0 && q > 1) {
+                // Agar AI ne Grand Total bhej diya jo (Qty * Rate) se 2x se zyada bada ho
+                if (a > (expectedAmt * 1.5)) {
+                  a = Math.max(0, expectedAmt);
+                }
+              }
+
+              return {
+                partNo: it.partNo || "",
+                desc: it.desc || "",
+                qty: q.toString(),
+                unit: (it.unit || "NOS").trim().toUpperCase(),
+                rate: r.toFixed(2),
+                discountPercent: dp > 0 ? dp.toString() : "0",
+                discountAmount: da > 0 ? da.toFixed(2) : "0",
+                amount: a.toFixed(2)
+              };
+            })
             required: ["desc", "qty", "rate", "amount"]
           }
         }
       },
       required: ["isPurchaseOrder", "buyerCompanyName", "poNumber", "items"]
     };
-
     for (let key of candidateKeys) {
       const cleanKey = key.trim();
 
