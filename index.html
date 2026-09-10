@@ -61,12 +61,17 @@
 
     .api-key-box input {
       flex: 1;
-      min-width: 260px;
-      padding: 9px 12px;
-      border: 1px solid var(--border);
+      min-width: 280px;
+      padding: 10px 12px;
+      border: 1.5px solid var(--border);
       border-radius: 5px;
       font-size: 13px;
       font-family: monospace;
+    }
+
+    .api-key-box input:focus {
+      border-color: var(--primary);
+      outline: none;
     }
 
     .filter-section-pre {
@@ -397,12 +402,12 @@
 <div class="container">
   <div class="header-box">
     <h1>AI Purchase Order Extractor</h1>
-    <p class="subtitle">Dual-Key High Speed Engine (Picks Exact Gmail Email Date)</p>
+    <p class="subtitle">Direct High-Speed Multimodal Analysis</p>
 
-    <!-- ONLY SECOND KEY DISPLAYED -->
+    <!-- SINGLE CLEAN API KEY INPUT -->
     <div class="api-key-box">
-      <label for="apiKeyInput" style="font-size: 13px; font-weight: 600;">Secondary Gemini API Key (Key 2):</label>
-      <input type="password" id="apiKeyInput" placeholder="Enter your 2nd Gemini API Key here (Key 1 is already active in background)...">
+      <label for="apiKeyInput" style="font-size: 13px; font-weight: 700; color: var(--primary-dark);">Gemini API Key (AI Studio):</label>
+      <input type="password" id="apiKeyInput" placeholder="Paste your AIzaSy... key here">
     </div>
 
     <div class="filter-section-pre">
@@ -521,12 +526,7 @@
 </div>
 
 <script>
-  // Hidden Background Key 1
-  const HIDDEN_KEY_1 = "AQ.Ab8RN6K0Y-ni_Sy2OkbuTGbQjkOMfHqUCWdQDJR3jqqGnKYX-w";
-
-  // Displayed Secondary Key 2
   const apiKeyInput = document.getElementById('apiKeyInput');
-
   const gmailEmail = document.getElementById('gmailEmail');
   const gmailPassword = document.getElementById('gmailPassword');
   const fetchGmailBtn = document.getElementById('fetchGmailBtn');
@@ -560,7 +560,6 @@
   const btnYesterday = document.getElementById('btnYesterday');
   const btnLast7 = document.getElementById('btnLast7');
 
-  // Flash Models
   const FAST_MODELS = [
     "gemini-3.5-flash-lite",
     "gemini-3.8-flash",
@@ -569,36 +568,19 @@
 
   const BACKEND_BASE = window.location.origin;
 
-  if (localStorage.getItem('gemini_api_key_secondary')) {
-    apiKeyInput.value = localStorage.getItem('gemini_api_key_secondary');
+  if (localStorage.getItem('gemini_api_key')) {
+    apiKeyInput.value = localStorage.getItem('gemini_api_key');
   }
   if (localStorage.getItem('gmail_email')) {
     gmailEmail.value = localStorage.getItem('gmail_email');
   }
 
   apiKeyInput.addEventListener('input', () => {
-    localStorage.setItem('gemini_api_key_secondary', apiKeyInput.value.trim());
+    localStorage.setItem('gemini_api_key', apiKeyInput.value.trim());
   });
   gmailEmail.addEventListener('input', () => {
     localStorage.setItem('gmail_email', gmailEmail.value.trim());
   });
-
-  // Returns list of active keys (Hidden Key 1 + Optional Secondary Key 2)
-  function getActiveApiKeys() {
-    const keys = [HIDDEN_KEY_1];
-    const secKey = apiKeyInput.value.trim();
-    if (secKey) {
-      keys.push(secKey);
-    }
-    return keys;
-  }
-
-  let keyIndexCounter = 0;
-  function getNextApiKey(keys) {
-    const key = keys[keyIndexCounter % keys.length];
-    keyIndexCounter++;
-    return key;
-  }
 
   const sleep = ms => new Promise(res => setTimeout(res, ms));
 
@@ -666,33 +648,17 @@
     return blockedTerms.some(t => lower.includes(t));
   }
 
-  function detectAndValidatePartNumber(aiPartNo, descText) {
+  function detectAndValidatePartNumber(aiPartNo) {
     let candidate = (aiPartNo || "").trim();
-
     if (candidate) {
       if (/^(11[A-Z0-9]+|ITM\w*|MAT\w*|IND\w*|ITEM\w*|CODE\w*|SR\w*|SL\w*)$/i.test(candidate)) return "";
       if (/^(\d+P-\d+A|\d+A|\d+X\d+|\d+V|\d+KW|\d+HP|\d+K|\d+-WAY|\d+MM)$/i.test(candidate)) return "";
       if (/^(SCHNEIDER|SIEMENS|L&T|ABB|HAVELLS|LEGRAND|NOS|SET|PCS|EA|MTR|KG)$/i.test(candidate)) return "";
       if (/^(NA|N\/A|NIL|NONE|NULL|-)$/i.test(candidate)) return "";
     }
-
     const isIndustrialPattern = /^(3[A-Z0-9]{2,4}[A-Z0-9-]{4,}|[A-Z]{2,4}\d{2,}[A-Z0-9-]*|[A-Z]{4,}\d{2,}[A-Z0-9]*|[0-9]{5,}[A-Z0-9-]*)$/i;
     if (candidate && isIndustrialPattern.test(candidate)) {
       return candidate;
-    }
-
-    if (descText) {
-      const words = String(descText).split(/[\s,;()]+/);
-      for (let word of words) {
-        let cleanWord = word.trim().replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, '');
-        if (/^(\d+P-\d+A|\d+A|\d+V|\d+KW|\d+HP|\d+K|\d+-WAY|\d+X\d+|\d+MM)$/i.test(cleanWord)) continue;
-        if (/^(SCHNEIDER|SIEMENS|L&T|ABB|HAVELLS|LEGRAND|NOS|SET|PCS)$/i.test(cleanWord)) continue;
-        if (/^(11[A-Z0-9]+|ITM\w*|MAT\w*|IND\w*|ITEM\w*)/i.test(cleanWord)) continue;
-
-        if (isIndustrialPattern.test(cleanWord)) {
-          return cleanWord;
-        }
-      }
     }
     return "";
   }
@@ -827,7 +793,7 @@
     updateNumbersAndCount();
   });
 
-  async function processPdfItems(fileList, keysList, alreadyProcessedSet = new Set(), forceReprocess = false) {
+  async function processPdfItems(fileList, apiKey, alreadyProcessedSet = new Set(), forceReprocess = false) {
     let newlyExtracted = 0;
     let skippedCount = 0;
     let duplicateSkipped = 0;
@@ -844,13 +810,10 @@
         continue;
       }
 
-      // Rotate API Keys between Hidden Key 1 and Screen Key 2
-      const activeApiKey = getNextApiKey(keysList);
-      const isHiddenKey = activeApiKey === HIDDEN_KEY_1;
-      statusText.textContent = `[${isHiddenKey ? "Key 1 (Default)" : "Key 2 (User)"}] Analyzing [${f + 1}/${fileList.length}]: ${fileName}...`;
+      statusText.textContent = `Analyzing [${f + 1}/${fileList.length}]: ${fileName}...`;
 
       try {
-       const extractedData = await callGeminiAIWithRetry(keysList, fileObj.base64)
+        const extractedData = await callGeminiAIWithRetry(apiKey, fileObj.base64);
 
         if (!extractedData || extractedData.isPurchaseOrder === false) {
           skippedCount++;
@@ -879,7 +842,6 @@
           let resolvedCompany = String(extractedData.companyName || "").trim();
           let resolvedAddress = String(extractedData.companyAddress || "").trim();
 
-          // Blacklist Classic Automation from being buyer
           if (resolvedCompany.toLowerCase().includes("classic automation")) {
             resolvedCompany = "";
           }
@@ -903,7 +865,7 @@
             const currentTotal = tableBody.querySelectorAll('tr').length + 1;
             newlyExtracted++;
 
-            const finalPartNo = detectAndValidatePartNumber(item.partNo, item.desc);
+            const finalPartNo = detectAndValidatePartNumber(item.partNo);
 
             addRowToTable({
               sNo: currentTotal,
@@ -933,11 +895,12 @@
             }).catch(() => {});
           }
         }
-        await sleep(500); // Super-fast 500ms delay with 2 keys
+        await sleep(1500);
       } catch (docErr) {
         skippedCount++;
         statusText.textContent = `Error reading ${fileName}: ${docErr.message}`;
-        await sleep(500);
+        alert(`API Error on ${fileName}:\n${docErr.message}`);
+        break; // Stop immediately to show exact error instead of looping
       }
     }
 
@@ -946,11 +909,12 @@
   }
 
   fetchGmailBtn.addEventListener('click', async () => {
-    const keysList = getActiveApiKeys();
+    const apiKey = apiKeyInput.value.trim();
     const emailVal = gmailEmail.value.trim();
     const passVal = gmailPassword.value.trim();
     const forceReprocess = forceReprocessCheck.checked;
 
+    if (!apiKey) return alert("Please enter your Gemini API Key.");
     if (!emailVal || !passVal) return alert("Please enter Gmail Address & App Password.");
 
     fetchGmailBtn.disabled = true;
@@ -960,7 +924,7 @@
       ? `${filterBounds.date_from} to ${filterBounds.date_to || filterBounds.date_from}`
       : "All Dates";
 
-    statusText.textContent = `Connecting to Gmail (${keysList.length} active key engine) [${dateNotice}]...`;
+    statusText.textContent = `Connecting to Gmail [${dateNotice}]...`;
 
     try {
       const payload = { 
@@ -998,7 +962,7 @@
         email_date: f.email_date 
       }));
 
-      await processPdfItems(files, keysList, alreadyProcessed, forceReprocess);
+      await processPdfItems(files, apiKey, alreadyProcessed, forceReprocess);
     } catch (err) {
       alert("Error: " + err.message);
       statusText.textContent = "Error: " + err.message;
@@ -1008,7 +972,8 @@
   });
 
   processBtn.addEventListener('click', async () => {
-    const keysList = getActiveApiKeys();
+    const apiKey = apiKeyInput.value.trim();
+    if (!apiKey) return alert("Enter Gemini API key.");
     if (!pdfInput.files || pdfInput.files.length === 0) return alert("Select files first.");
 
     processBtn.disabled = true;
@@ -1029,7 +994,7 @@
         fileList.push({ name: file.name, filename: file.name, base64: base64, email_date: "" });
       }
 
-      await processPdfItems(fileList, keysList, alreadyProcessed, true);
+      await processPdfItems(fileList, apiKey, alreadyProcessed, true);
       pdfInput.value = '';
     } catch (err) {
       alert("Error: " + err.message);
@@ -1047,36 +1012,43 @@
       reader.onerror = reject;
     });
   }
-async function callGeminiAIWithRetry(keysList, base64Pdf) {
+
+  async function callGeminiAIWithRetry(apiKey, base64Pdf) {
+    const cleanKey = apiKey.trim();
     let lastError = null;
 
     const systemInstruction = `You are a zero-tolerance industrial procurement auditor.
 Carefully review the PDF document page-by-page.
 
 RULE 1: STRICT INVOICE & BILL REJECTION
-- If document says "TAX INVOICE", "INVOICE", "COMMERCIAL INVOICE", "PROFORMA INVOICE", "RETAIL INVOICE", "DELIVERY CHALLAN", "E-WAY BILL", "IRN NO", "BILL OF SUPPLY":
-  -> Mark isPurchaseOrder: false immediately.
+- If the document contains any of the following titles:
+  "TAX INVOICE", "INVOICE", "COMMERCIAL INVOICE", "PROFORMA INVOICE", "RETAIL INVOICE",
+  "DELIVERY CHALLAN", "E-WAY BILL", "IRN NO", "BILL OF SUPPLY", "PAYMENT VOUCHER"
+  -> THIS IS A BILL/INVOICE, NOT A PURCHASE ORDER!
+  -> Even if it mentions "Buyer PO Ref" or "Against PO No.", set isPurchaseOrder: false immediately.
 
 RULE 2: STRICT BUYER VS VENDOR EXTRACTION
-- Under buyerCompanyName, output ONLY the BUYER organization (Customer/Client). NEVER output Classic Automation or the vendor name.
-- Under buyerBillingAddress, output the registered or billing address of that BUYER company.
+- Under buyerCompanyName, output ONLY the BUYER organization. NEVER output Classic Automation or the vendor name.
+- Under buyerBillingAddress, output the registered/billing plant address of that BUYER company.
 
 RULE 3: PO NUMBER EXTRACTION
-- Extract PO Number / Order Number / Indent Number next to "P.O. No.", "Order Ref:", "PO #", "SAP PO:".
-- Capture complete number (e.g. 4510066200, 0630032011). Never output GSTIN or Vendor Code.
+- Extract the PO Number / Order Number / Indent Number written next to labels like "P.O. No.", "Order Ref:", "PO #", "SAP PO:".
+- Capture complete numbers (e.g. 4510066200, 0630032011).
+- Do NOT confuse GSTIN (15 characters) or Vendor Code with PO Number.
 
-RULE 4: MATHEMATICAL PRECISION
-- "partNo": Genuine manufacturer part number. Blank string "" if not printed.
+RULE 4: MATHEMATICAL PRECISION FOR LINE ITEM AMOUNTS
+- "partNo": Genuine manufacturer part/catalogue number. Blank string "" if not printed.
 - "qty": Pure numeric quantity (e.g., "10", "2").
 - "rate": Unit price before tax. Clean numbers only.
-- "discountPercent": Discount percentage or "0".
-- "discountAmount": Discount amount or "0".
-- "amount": Line total = (qty * rate) - discountAmount. Never output Grand Total as line amount.`;
+- "discountPercent": Explicit discount percentage if written, else "0".
+- "discountAmount": Explicit discount value if written, else "0".
+- "amount": The exact BASIC line total = (qty * rate) - discountAmount. Never output Grand Total as line amount.`;
 
     const jsonSchema = {
       type: "OBJECT",
       properties: {
         isPurchaseOrder: { type: "BOOLEAN" },
+        documentType: { type: "STRING" },
         buyerCompanyName: { type: "STRING" },
         buyerBillingAddress: { type: "STRING" },
         poNumber: { type: "STRING" },
@@ -1086,7 +1058,7 @@ RULE 4: MATHEMATICAL PRECISION
           items: {
             type: "OBJECT",
             properties: {
-              partNo: { type: "STRING" },
+              partNo: { type: "STRING", description: "Manufacturer part number. Blank string if not present." },
               desc: { type: "STRING" },
               qty: { type: "STRING" },
               unit: { type: "STRING" },
@@ -1102,110 +1074,111 @@ RULE 4: MATHEMATICAL PRECISION
       required: ["isPurchaseOrder", "buyerCompanyName", "poNumber", "items"]
     };
 
-    // Cycle through all available API keys on 429
-    for (let k = 0; k < keysList.length; k++) {
-      const cleanKey = keysList[k].trim();
+    for (let rawModel of FAST_MODELS) {
+      const cleanModel = rawModel.replace(/^models\//, "");
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent?key=${cleanKey}`;
 
-      for (let rawModel of FAST_MODELS) {
-        const cleanModel = rawModel.replace(/^models\//, "");
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent?key=${cleanKey}`;
-
-        try {
-          const response = await fetch(url, {
-            method: "POST",
-            headers: { 
-              "Content-Type": "application/json",
-              "x-goog-api-key": cleanKey 
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          headers: { 
+            "Content-Type": "application/json",
+            "x-goog-api-key": cleanKey 
+          },
+          body: JSON.stringify({
+            system_instruction: {
+              parts: [{ text: systemInstruction }]
             },
-            body: JSON.stringify({
-              system_instruction: { parts: [{ text: systemInstruction }] },
-              contents: [{
-                parts: [
-                  { text: "Extract all Purchase Order details strictly following schema. Classic Automation is vendor, not buyer." },
-                  { inline_data: { mime_type: "application/pdf", data: base64Pdf } }
-                ]
-              }],
-              generationConfig: { 
-                response_mime_type: "application/json",
-                response_schema: jsonSchema,
-                temperature: 0.0 
-              }
-            })
-          });
-
-          if (response.ok) {
-            const resJson = await response.json();
-            const candidate = resJson.candidates?.[0]?.content?.parts?.[0]?.text;
-            let data = JSON.parse(candidate || "{}");
-
-            return {
-              isPurchaseOrder: data.isPurchaseOrder === true,
-              companyName: (data.buyerCompanyName || "").trim(),
-              companyAddress: (data.buyerBillingAddress || "").trim(),
-              poNo: (data.poNumber || "").trim(),
-              date: (data.poDate || "").trim(),
-              items: (data.items || []).map(it => {
-                const cleanQty = String(it.qty || "1").replace(/[^0-9.]/g, '') || "1";
-                const cleanRate = String(it.rate || "0").replace(/[^0-9.]/g, '') || "0";
-                const cleanDiscPct = String(it.discountPercent || "0").replace(/[^0-9.]/g, '') || "0";
-                let cleanDiscAmt = String(it.discountAmount || "0").replace(/[^0-9.]/g, '') || "0";
-                let cleanAmt = String(it.amount || "0").replace(/[^0-9.]/g, '') || "0";
-
-                const q = parseFloat(cleanQty) || 1;
-                const r = parseFloat(cleanRate) || 0;
-                const dp = parseFloat(cleanDiscPct) || 0;
-                let da = parseFloat(cleanDiscAmt) || 0;
-                let a = parseFloat(cleanAmt) || 0;
-
-                if (dp > 0 && da === 0 && r > 0) {
-                  da = (q * r * dp) / 100;
-                  cleanDiscAmt = da.toFixed(2);
-                }
-
-                if ((a === 0 || isNaN(a)) && r > 0) {
-                  a = (q * r) - da;
-                  cleanAmt = a.toFixed(2);
-                } else if (a > 0) {
-                  cleanAmt = a.toFixed(2);
-                }
-
-                return {
-                  partNo: it.partNo || "",
-                  desc: it.desc || "",
-                  qty: cleanQty,
-                  unit: it.unit || "NOS",
-                  rate: cleanRate,
-                  discountPercent: cleanDiscPct,
-                  discountAmount: cleanDiscAmt,
-                  amount: cleanAmt
-                };
-              })
-            };
-          }
-
-          // AGAR 429 AAYA: 15s wait mat karo, agle key par turant switch karo!
-          if (response.status === 429) {
-            if (keysList.length > 1 && k < keysList.length - 1) {
-              statusText.textContent = `⚡ Key ${k + 1} busy. Auto-switching to Key ${k + 2} instantly...`;
-              break; // Breaks model loop and jumps to next key immediately!
-            } else {
-              // Agar saari keys exhaust ho chuki hain, tabhi pause karega
-              await countdownWait(10, "Both API Keys Quota busy");
-              continue;
+            contents: [{
+              parts: [
+                { text: "Extract all Purchase Order details from this attached document following the exact schema. Strictly remember Classic Automation is the vendor, NOT the buyer." },
+                { inline_data: { mime_type: "application/pdf", data: base64Pdf } }
+              ]
+            }],
+            generationConfig: { 
+              response_mime_type: "application/json",
+              response_schema: jsonSchema,
+              temperature: 0.0 
             }
-          }
+          })
+        });
 
-          const errData = await response.json().catch(() => ({}));
-          lastError = errData.error?.message || `HTTP ${response.status}`;
-          break;
-        } catch (netErr) {
-          lastError = netErr.message;
-          await sleep(400);
+        if (response.ok) {
+          const resJson = await response.json();
+          const candidate = resJson.candidates?.[0]?.content?.parts?.[0]?.text;
+          let data = JSON.parse(candidate || "{}");
+
+          return {
+            isPurchaseOrder: data.isPurchaseOrder === true,
+            companyName: (data.buyerCompanyName || "").trim(),
+            companyAddress: (data.buyerBillingAddress || "").trim(),
+            poNo: (data.poNumber || "").trim(),
+            date: (data.poDate || "").trim(),
+            items: (data.items || []).map(it => {
+              const cleanQty = String(it.qty || "1").replace(/[^0-9.]/g, '') || "1";
+              const cleanRate = String(it.rate || "0").replace(/[^0-9.]/g, '') || "0";
+              const cleanDiscPct = String(it.discountPercent || "0").replace(/[^0-9.]/g, '') || "0";
+              let cleanDiscAmt = String(it.discountAmount || "0").replace(/[^0-9.]/g, '') || "0";
+              let cleanAmt = String(it.amount || "0").replace(/[^0-9.]/g, '') || "0";
+
+              const q = parseFloat(cleanQty) || 1;
+              const r = parseFloat(cleanRate) || 0;
+              const dp = parseFloat(cleanDiscPct) || 0;
+              let da = parseFloat(cleanDiscAmt) || 0;
+              let a = parseFloat(cleanAmt) || 0;
+
+              if (dp > 0 && da === 0 && r > 0) {
+                da = (q * r * dp) / 100;
+                cleanDiscAmt = da.toFixed(2);
+              }
+
+              if ((a === 0 || isNaN(a)) && r > 0) {
+                a = (q * r) - da;
+                cleanAmt = a.toFixed(2);
+              } else if (a > 0) {
+                cleanAmt = a.toFixed(2);
+              }
+
+              return {
+                partNo: it.partNo || "",
+                desc: it.desc || "",
+                qty: cleanQty,
+                unit: it.unit || "NOS",
+                rate: cleanRate,
+                discountPercent: cleanDiscPct,
+                discountAmount: cleanDiscAmt,
+                amount: cleanAmt
+              };
+            })
+          };
         }
+
+        const errData = await response.json().catch(() => ({}));
+        const errMsg = errData.error?.message || `HTTP ${response.status}`;
+
+        // Real Rate Limit (429) Handling
+        if (response.status === 429) {
+          await countdownWait(20, "Rate limit reached");
+          continue;
+        }
+
+        // Catch Authentication & Permissions errors directly
+        if (response.status === 400 || response.status === 403) {
+          throw new Error(`Google API Authentication Error (${response.status}): ${errMsg}. Please verify your API Key starts with 'AIzaSy' from aistudio.google.com/apikey`);
+        }
+
+        lastError = errMsg;
+      } catch (netErr) {
+        lastError = netErr.message;
+        if (netErr.message.includes("Google API Authentication Error")) {
+          throw netErr;
+        }
+        await sleep(500);
       }
     }
-    throw new Error(lastError || "Extraction failed on all available API keys.");
+    throw new Error(lastError || "Extraction failed.");
   }
+
   function addRowToTable(data = {}) {
     const tr = document.createElement('tr');
     const thElements = headerRow.querySelectorAll('th');
