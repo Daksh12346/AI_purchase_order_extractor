@@ -51,22 +51,38 @@
       color: var(--ink-muted);
     }
 
-    .api-key-box {
-      margin-bottom: 16px;
-      display: flex;
+    .api-key-container {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
       gap: 12px;
-      align-items: center;
-      flex-wrap: wrap;
+      margin-bottom: 16px;
+      background: #F8FAF9;
+      padding: 14px;
+      border-radius: 6px;
+      border: 1.5px solid #C1DDD6;
+    }
+
+    .api-key-box {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .api-key-box label {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--primary-dark);
+      text-transform: uppercase;
     }
 
     .api-key-box input {
-      flex: 1;
-      min-width: 280px;
-      padding: 10px 12px;
-      border: 1.5px solid var(--border);
+      width: 100%;
+      padding: 9px 12px;
+      border: 1px solid var(--border);
       border-radius: 5px;
       font-size: 13px;
       font-family: monospace;
+      background: #fff;
     }
 
     .api-key-box input:focus {
@@ -402,12 +418,18 @@
 <div class="container">
   <div class="header-box">
     <h1>AI Purchase Order Extractor</h1>
-    <p class="subtitle">Direct High-Speed Multimodal Analysis</p>
+    <p class="subtitle">Dual-Key Parallel Speed Engine (Picks Exact Gmail Email Date)</p>
 
-    <!-- SINGLE CLEAN API KEY INPUT -->
-    <div class="api-key-box">
-      <label for="apiKeyInput" style="font-size: 13px; font-weight: 700; color: var(--primary-dark);">Gemini API Key (AI Studio):</label>
-      <input type="password" id="apiKeyInput" placeholder="Paste your AIzaSy... key here">
+    <!-- 2 USER-INPUT API KEY BOXES -->
+    <div class="api-key-container">
+      <div class="api-key-box">
+        <label for="apiKeyInput1">🔑 Gemini API Key 1:</label>
+        <input type="password" id="apiKeyInput1" placeholder="Paste your 1st Gemini API Key (AIzaSy...)">
+      </div>
+      <div class="api-key-box">
+        <label for="apiKeyInput2">🔑 Gemini API Key 2:</label>
+        <input type="password" id="apiKeyInput2" placeholder="Paste your 2nd Gemini API Key (AIzaSy...)">
+      </div>
     </div>
 
     <div class="filter-section-pre">
@@ -526,7 +548,9 @@
 </div>
 
 <script>
-  const apiKeyInput = document.getElementById('apiKeyInput');
+  const apiKeyInput1 = document.getElementById('apiKeyInput1');
+  const apiKeyInput2 = document.getElementById('apiKeyInput2');
+
   const gmailEmail = document.getElementById('gmailEmail');
   const gmailPassword = document.getElementById('gmailPassword');
   const fetchGmailBtn = document.getElementById('fetchGmailBtn');
@@ -568,19 +592,45 @@
 
   const BACKEND_BASE = window.location.origin;
 
-  if (localStorage.getItem('gemini_api_key')) {
-    apiKeyInput.value = localStorage.getItem('gemini_api_key');
+  // Pre-load saved keys from localStorage
+  if (localStorage.getItem('gemini_api_key_custom_1')) {
+    apiKeyInput1.value = localStorage.getItem('gemini_api_key_custom_1');
+  } else if (localStorage.getItem('gemini_api_key')) {
+    apiKeyInput1.value = localStorage.getItem('gemini_api_key');
   }
+
+  if (localStorage.getItem('gemini_api_key_custom_2')) {
+    apiKeyInput2.value = localStorage.getItem('gemini_api_key_custom_2');
+  }
+
   if (localStorage.getItem('gmail_email')) {
     gmailEmail.value = localStorage.getItem('gmail_email');
   }
 
-  apiKeyInput.addEventListener('input', () => {
-    localStorage.setItem('gemini_api_key', apiKeyInput.value.trim());
+  apiKeyInput1.addEventListener('input', () => {
+    localStorage.setItem('gemini_api_key_custom_1', apiKeyInput1.value.trim());
+  });
+  apiKeyInput2.addEventListener('input', () => {
+    localStorage.setItem('gemini_api_key_custom_2', apiKeyInput2.value.trim());
   });
   gmailEmail.addEventListener('input', () => {
     localStorage.setItem('gmail_email', gmailEmail.value.trim());
   });
+
+  function getActiveApiKeys() {
+    const keys = [];
+    if (apiKeyInput1.value.trim()) keys.push(apiKeyInput1.value.trim());
+    if (apiKeyInput2.value.trim()) keys.push(apiKeyInput2.value.trim());
+    return keys;
+  }
+
+  let keyRotationIndex = 0;
+  function getNextApiKey(keys) {
+    if (keys.length === 0) return "";
+    const key = keys[keyRotationIndex % keys.length];
+    keyRotationIndex++;
+    return key;
+  }
 
   const sleep = ms => new Promise(res => setTimeout(res, ms));
 
@@ -793,7 +843,7 @@
     updateNumbersAndCount();
   });
 
-  async function processPdfItems(fileList, apiKey, alreadyProcessedSet = new Set(), forceReprocess = false) {
+  async function processPdfItems(fileList, keysList, alreadyProcessedSet = new Set(), forceReprocess = false) {
     let newlyExtracted = 0;
     let skippedCount = 0;
     let duplicateSkipped = 0;
@@ -810,10 +860,12 @@
         continue;
       }
 
-      statusText.textContent = `Analyzing [${f + 1}/${fileList.length}]: ${fileName}...`;
+      const chosenApiKey = getNextApiKey(keysList);
+      const keyLabel = keysList.indexOf(chosenApiKey) + 1;
+      statusText.textContent = `[Key ${keyLabel}] Analyzing [${f + 1}/${fileList.length}]: ${fileName}...`;
 
       try {
-        const extractedData = await callGeminiAIWithRetry(apiKey, fileObj.base64);
+        const extractedData = await callGeminiAIWithRetry(chosenApiKey, keysList, fileObj.base64);
 
         if (!extractedData || extractedData.isPurchaseOrder === false) {
           skippedCount++;
@@ -895,12 +947,12 @@
             }).catch(() => {});
           }
         }
-        await sleep(1500);
+        await sleep(1000);
       } catch (docErr) {
         skippedCount++;
         statusText.textContent = `Error reading ${fileName}: ${docErr.message}`;
         alert(`API Error on ${fileName}:\n${docErr.message}`);
-        break; // Stop immediately to show exact error instead of looping
+        break;
       }
     }
 
@@ -909,12 +961,12 @@
   }
 
   fetchGmailBtn.addEventListener('click', async () => {
-    const apiKey = apiKeyInput.value.trim();
+    const keysList = getActiveApiKeys();
     const emailVal = gmailEmail.value.trim();
     const passVal = gmailPassword.value.trim();
     const forceReprocess = forceReprocessCheck.checked;
 
-    if (!apiKey) return alert("Please enter your Gemini API Key.");
+    if (keysList.length === 0) return alert("Please enter at least one Gemini API Key in Key 1 or Key 2 box.");
     if (!emailVal || !passVal) return alert("Please enter Gmail Address & App Password.");
 
     fetchGmailBtn.disabled = true;
@@ -924,7 +976,7 @@
       ? `${filterBounds.date_from} to ${filterBounds.date_to || filterBounds.date_from}`
       : "All Dates";
 
-    statusText.textContent = `Connecting to Gmail [${dateNotice}]...`;
+    statusText.textContent = `Connecting to Gmail (${keysList.length} Key Engine) [${dateNotice}]...`;
 
     try {
       const payload = { 
@@ -962,7 +1014,7 @@
         email_date: f.email_date 
       }));
 
-      await processPdfItems(files, apiKey, alreadyProcessed, forceReprocess);
+      await processPdfItems(files, keysList, alreadyProcessed, forceReprocess);
     } catch (err) {
       alert("Error: " + err.message);
       statusText.textContent = "Error: " + err.message;
@@ -972,8 +1024,8 @@
   });
 
   processBtn.addEventListener('click', async () => {
-    const apiKey = apiKeyInput.value.trim();
-    if (!apiKey) return alert("Enter Gemini API key.");
+    const keysList = getActiveApiKeys();
+    if (keysList.length === 0) return alert("Enter at least one Gemini API key.");
     if (!pdfInput.files || pdfInput.files.length === 0) return alert("Select files first.");
 
     processBtn.disabled = true;
@@ -994,7 +1046,7 @@
         fileList.push({ name: file.name, filename: file.name, base64: base64, email_date: "" });
       }
 
-      await processPdfItems(fileList, apiKey, alreadyProcessed, true);
+      await processPdfItems(fileList, keysList, alreadyProcessed, true);
       pdfInput.value = '';
     } catch (err) {
       alert("Error: " + err.message);
@@ -1013,8 +1065,8 @@
     });
   }
 
-  async function callGeminiAIWithRetry(apiKey, base64Pdf) {
-    const cleanKey = apiKey.trim();
+  async function callGeminiAIWithRetry(initialKey, allKeysList, base64Pdf) {
+    let candidateKeys = [initialKey, ...allKeysList.filter(k => k !== initialKey)];
     let lastError = null;
 
     const systemInstruction = `You are a zero-tolerance industrial procurement auditor.
@@ -1074,109 +1126,117 @@ RULE 4: MATHEMATICAL PRECISION FOR LINE ITEM AMOUNTS
       required: ["isPurchaseOrder", "buyerCompanyName", "poNumber", "items"]
     };
 
-    for (let rawModel of FAST_MODELS) {
-      const cleanModel = rawModel.replace(/^models\//, "");
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent?key=${cleanKey}`;
+    for (let key of candidateKeys) {
+      const cleanKey = key.trim();
 
-      try {
-        const response = await fetch(url, {
-          method: "POST",
-          headers: { 
-            "Content-Type": "application/json",
-            "x-goog-api-key": cleanKey 
-          },
-          body: JSON.stringify({
-            system_instruction: {
-              parts: [{ text: systemInstruction }]
+      for (let rawModel of FAST_MODELS) {
+        const cleanModel = rawModel.replace(/^models\//, "");
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent?key=${cleanKey}`;
+
+        try {
+          const response = await fetch(url, {
+            method: "POST",
+            headers: { 
+              "Content-Type": "application/json",
+              "x-goog-api-key": cleanKey 
             },
-            contents: [{
-              parts: [
-                { text: "Extract all Purchase Order details from this attached document following the exact schema. Strictly remember Classic Automation is the vendor, NOT the buyer." },
-                { inline_data: { mime_type: "application/pdf", data: base64Pdf } }
-              ]
-            }],
-            generationConfig: { 
-              response_mime_type: "application/json",
-              response_schema: jsonSchema,
-              temperature: 0.0 
-            }
-          })
-        });
-
-        if (response.ok) {
-          const resJson = await response.json();
-          const candidate = resJson.candidates?.[0]?.content?.parts?.[0]?.text;
-          let data = JSON.parse(candidate || "{}");
-
-          return {
-            isPurchaseOrder: data.isPurchaseOrder === true,
-            companyName: (data.buyerCompanyName || "").trim(),
-            companyAddress: (data.buyerBillingAddress || "").trim(),
-            poNo: (data.poNumber || "").trim(),
-            date: (data.poDate || "").trim(),
-            items: (data.items || []).map(it => {
-              const cleanQty = String(it.qty || "1").replace(/[^0-9.]/g, '') || "1";
-              const cleanRate = String(it.rate || "0").replace(/[^0-9.]/g, '') || "0";
-              const cleanDiscPct = String(it.discountPercent || "0").replace(/[^0-9.]/g, '') || "0";
-              let cleanDiscAmt = String(it.discountAmount || "0").replace(/[^0-9.]/g, '') || "0";
-              let cleanAmt = String(it.amount || "0").replace(/[^0-9.]/g, '') || "0";
-
-              const q = parseFloat(cleanQty) || 1;
-              const r = parseFloat(cleanRate) || 0;
-              const dp = parseFloat(cleanDiscPct) || 0;
-              let da = parseFloat(cleanDiscAmt) || 0;
-              let a = parseFloat(cleanAmt) || 0;
-
-              if (dp > 0 && da === 0 && r > 0) {
-                da = (q * r * dp) / 100;
-                cleanDiscAmt = da.toFixed(2);
+            body: JSON.stringify({
+              system_instruction: {
+                parts: [{ text: systemInstruction }]
+              },
+              contents: [{
+                parts: [
+                  { text: "Extract all Purchase Order details from this attached document following the exact schema. Strictly remember Classic Automation is the vendor, NOT the buyer." },
+                  { inline_data: { mime_type: "application/pdf", data: base64Pdf } }
+                ]
+              }],
+              generationConfig: { 
+                response_mime_type: "application/json",
+                response_schema: jsonSchema,
+                temperature: 0.0 
               }
-
-              if ((a === 0 || isNaN(a)) && r > 0) {
-                a = (q * r) - da;
-                cleanAmt = a.toFixed(2);
-              } else if (a > 0) {
-                cleanAmt = a.toFixed(2);
-              }
-
-              return {
-                partNo: it.partNo || "",
-                desc: it.desc || "",
-                qty: cleanQty,
-                unit: it.unit || "NOS",
-                rate: cleanRate,
-                discountPercent: cleanDiscPct,
-                discountAmount: cleanDiscAmt,
-                amount: cleanAmt
-              };
             })
-          };
-        }
+          });
 
-        const errData = await response.json().catch(() => ({}));
-        const errMsg = errData.error?.message || `HTTP ${response.status}`;
+          if (response.ok) {
+            const resJson = await response.json();
+            const candidate = resJson.candidates?.[0]?.content?.parts?.[0]?.text;
+            let data = JSON.parse(candidate || "{}");
 
-        // Real Rate Limit (429) Handling
-        if (response.status === 429) {
-          await countdownWait(20, "Rate limit reached");
-          continue;
-        }
+            return {
+              isPurchaseOrder: data.isPurchaseOrder === true,
+              companyName: (data.buyerCompanyName || "").trim(),
+              companyAddress: (data.buyerBillingAddress || "").trim(),
+              poNo: (data.poNumber || "").trim(),
+              date: (data.poDate || "").trim(),
+              items: (data.items || []).map(it => {
+                const cleanQty = String(it.qty || "1").replace(/[^0-9.]/g, '') || "1";
+                const cleanRate = String(it.rate || "0").replace(/[^0-9.]/g, '') || "0";
+                const cleanDiscPct = String(it.discountPercent || "0").replace(/[^0-9.]/g, '') || "0";
+                let cleanDiscAmt = String(it.discountAmount || "0").replace(/[^0-9.]/g, '') || "0";
+                let cleanAmt = String(it.amount || "0").replace(/[^0-9.]/g, '') || "0";
 
-        // Catch Authentication & Permissions errors directly
-        if (response.status === 400 || response.status === 403) {
-          throw new Error(`Google API Authentication Error (${response.status}): ${errMsg}. Please verify your API Key starts with 'AIzaSy' from aistudio.google.com/apikey`);
-        }
+                const q = parseFloat(cleanQty) || 1;
+                const r = parseFloat(cleanRate) || 0;
+                const dp = parseFloat(cleanDiscPct) || 0;
+                let da = parseFloat(cleanDiscAmt) || 0;
+                let a = parseFloat(cleanAmt) || 0;
 
-        lastError = errMsg;
-      } catch (netErr) {
-        lastError = netErr.message;
-        if (netErr.message.includes("Google API Authentication Error")) {
-          throw netErr;
+                if (dp > 0 && da === 0 && r > 0) {
+                  da = (q * r * dp) / 100;
+                  cleanDiscAmt = da.toFixed(2);
+                }
+
+                if ((a === 0 || isNaN(a)) && r > 0) {
+                  a = (q * r) - da;
+                  cleanAmt = a.toFixed(2);
+                } else if (a > 0) {
+                  cleanAmt = a.toFixed(2);
+                }
+
+                return {
+                  partNo: it.partNo || "",
+                  desc: it.desc || "",
+                  qty: cleanQty,
+                  unit: it.unit || "NOS",
+                  rate: cleanRate,
+                  discountPercent: cleanDiscPct,
+                  discountAmount: cleanDiscAmt,
+                  amount: cleanAmt
+                };
+              })
+            };
+          }
+
+          const errData = await response.json().catch(() => ({}));
+          const errMsg = errData.error?.message || `HTTP ${response.status}`;
+
+          // Rate limit 429 par agar dusri key available hai toh bina rukhe switch karega
+          if (response.status === 429) {
+            if (candidateKeys.length > 1 && key === candidateKeys[0]) {
+              statusText.textContent = `⚡ Key 1 rate limit reached. Auto-switching to Key 2 immediately...`;
+              break; 
+            } else {
+              await countdownWait(15, "Rate limit reached on available keys");
+              continue;
+            }
+          }
+
+          if (response.status === 400 || response.status === 403) {
+            throw new Error(`Google API Authentication Error (${response.status}): ${errMsg}. Make sure your key is valid and starts with 'AIzaSy' from Google AI Studio.`);
+          }
+
+          lastError = errMsg;
+        } catch (netErr) {
+          lastError = netErr.message;
+          if (netErr.message.includes("Google API Authentication Error")) {
+            throw netErr;
+          }
+          await sleep(500);
         }
-        await sleep(500);
       }
     }
-    throw new Error(lastError || "Extraction failed.");
+    throw new Error(lastError || "Extraction failed on all provided API keys.");
   }
 
   function addRowToTable(data = {}) {
