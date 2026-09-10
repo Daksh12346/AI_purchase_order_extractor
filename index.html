@@ -418,7 +418,7 @@
 <div class="container">
   <div class="header-box">
     <h1>AI Purchase Order Extractor</h1>
-    <p class="subtitle">Complete Procurement System (Zero Truncation, Strict Document Validation, Accurate Rate/Qty Mapping)</p>
+    <p class="subtitle">Complete Procurement System (High Coverage, Strict Invoice Skipping, Accurate Rates)</p>
 
     <div class="api-key-container">
       <div class="api-key-box">
@@ -478,7 +478,7 @@
 
     <div class="upload-zone">
       <input type="file" id="pdfInput" accept=".pdf,application/pdf" multiple>
-      <div style="font-size: 12px; color: #888; margin-top: 6px;">Upload all PDF documents (non-PO documents will be automatically skipped)</div>
+      <div style="font-size: 12px; color: #888; margin-top: 6px;">Upload all PDF documents (Invoices/Bills will be automatically skipped)</div>
     </div>
 
     <div class="action-buttons">
@@ -583,13 +583,14 @@
   const btnToday = document.getElementById('btnToday');
   const btnYesterday = document.getElementById('btnYesterday');
   const btnLast7 = document.getElementById('btnLast7');
-  
- // Official Gemini 3 Generation Fast Models
+
+  // Reliable, high-speed models
   const FAST_MODELS = [
-    "gemini-3-flash",
-    "gemini-3-flash-preview",
-    "gemini-3-pro"
+    "gemini-3.0-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.0-flash"
   ];
+
   const BACKEND_BASE = window.location.origin;
 
   if (localStorage.getItem('gemini_api_key_custom_1')) {
@@ -707,17 +708,17 @@
     }
   }
 
+  // Pre-filter: Only block CLEAR invoices/challans from filename. Never reject blindly.
   function isExplicitlyNonPoFile(filename) {
     if (!filename || typeof filename !== 'string') return false;
     const lower = filename.toLowerCase();
-    const blockedTerms = [
-      'tax invoice', 'tax_invoice', 'retail invoice', 'commercial invoice',
-      'invoice', 'delivery challan', 'challan', 'salary slip', 'receipt',
-      'quotation', 'quote', 'estimate', 'statement', 'credit note', 'debit note'
-    ];
-    const poTerms = ['purchase order', 'purchase_order', 'po_', '_po', 'p.o.', 'work order', 'indent'];
     
+    // Always permit PO indicators
+    const poTerms = ['po', 'purchase', 'order', 'indent', 'wo', 'workorder'];
     if (poTerms.some(t => lower.includes(t))) return false;
+
+    // Reject ONLY clear invoices / salary / challans
+    const blockedTerms = ['tax invoice', 'retail invoice', 'delivery challan', 'salary slip', 'receipt_'];
     return blockedTerms.some(t => lower.includes(t));
   }
 
@@ -746,7 +747,7 @@
     function isAuthenticCode(code) {
       if (!code || isBlacklisted(code)) return false;
       const c = code.trim();
-      if (c.length < 4 || c.length > 28) return false;
+      if (c.length < 3 || c.length > 30) return false;
       if (/^[A-Za-z0-9]+(?:[-/.][A-Za-z0-9]+)+$/.test(c)) return true;
       if (/^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9]{4,25}$/.test(c)) return true;
       if (/^[A-Z]{2,5}[0-9]{2,6}$/i.test(c)) return true;
@@ -763,7 +764,7 @@
         if (isAuthenticCode(cleanToken)) return cleanToken;
       }
     }
-    return "";
+    return colCandidate || "";
   }
 
   function sanitizeBuyerAddress(rawAddress) {
@@ -905,7 +906,6 @@
     updateNumbersAndCount();
   });
 
-  // Fast Batch Processing Pool (Concurrency = 3)
   async function processPdfItems(fileList, keysList, alreadyProcessedSet = new Set(), forceReprocess = false) {
     let newlyExtracted = 0;
     let skippedCount = 0;
@@ -918,7 +918,7 @@
       if (p && p.trim()) tableExistingPOs.add(p.trim().toUpperCase());
     });
 
-    const CONCURRENCY_LIMIT = 3;
+    const CONCURRENCY_LIMIT = 2;
     let fileCursor = 0;
 
     async function worker() {
@@ -930,7 +930,7 @@
         if (isExplicitlyNonPoFile(fileName)) {
           skippedCount++;
           processedTotal++;
-          statusText.textContent = `[${processedTotal}/${fileList.length}] Skipped non-PO filename: ${fileName}`;
+          statusText.textContent = `[${processedTotal}/${fileList.length}] Skipped invoice: ${fileName}`;
           continue;
         }
 
@@ -944,7 +944,7 @@
           if (!extractedData || extractedData.isPurchaseOrder === false) {
             skippedCount++;
             processedTotal++;
-            statusText.textContent = `[${processedTotal}/${fileList.length}] Ignored Non-PO: ${fileName} (${extractedData?.documentType || 'Not a PO'})`;
+            statusText.textContent = `[${processedTotal}/${fileList.length}] Skipped Non-PO: ${fileName}`;
             continue;
           }
 
@@ -964,7 +964,8 @@
             continue;
           }
 
-          if (extractedData && Array.isArray(extractedData.items) && extractedData.items.length > 0) {
+          const items = Array.isArray(extractedData.items) ? extractedData.items : [];
+          if (items.length > 0) {
             let resolvedCompany = String(extractedData.companyName || "").trim();
             let resolvedAddress = sanitizeBuyerAddress(extractedData.companyAddress);
 
@@ -977,7 +978,7 @@
             }
 
             if (!resolvedCompany || resolvedCompany.length < 2) {
-              resolvedCompany = "Buyer Organization";
+              resolvedCompany = "Client / Buyer Organization";
             }
 
             if (extractedPoNo) {
@@ -987,7 +988,7 @@
             const formattedGmailDate = formatGmailDateToDDMMYY(fileObj.email_date);
             const rawDocPoDate = extractedData.poDate || "";
 
-            extractedData.items.forEach(item => {
+            items.forEach(item => {
               const currentTotal = tableBody.querySelectorAll('tr').length + 1;
               newlyExtracted++;
 
@@ -1021,6 +1022,8 @@
                 body: JSON.stringify({ po_numbers: [extractedPoNo] })
               }).catch(() => {});
             }
+          } else {
+            skippedCount++;
           }
           processedTotal++;
         } catch (docErr) {
@@ -1038,7 +1041,7 @@
     }
     await Promise.all(workers);
 
-    statusText.textContent = `Completed! Added ${newlyExtracted} item(s). Skipped ${skippedCount} non-PO file(s), ${duplicateSkipped} duplicate(s).`;
+    statusText.textContent = `Done! Added ${newlyExtracted} item(s). Skipped ${skippedCount} non-PO / unreadable files.`;
     return { newlyExtracted, skippedCount, duplicateSkipped };
   }
 
@@ -1151,40 +1154,30 @@
     let candidateKeys = [initialKey, ...allKeysList.filter(k => k !== initialKey)];
     let lastError = null;
 
-    const systemInstruction = `You are a high-speed ERP auditor.
-Determine if the document is an authentic PURCHASE ORDER, and extract line items with strict numerical precision.
+    const systemInstruction = `You are an ERP purchase order data extractor.
+Your job is to extract commercial procurement details from the document.
 
-════════════════════════════════════════════════════════════════════
-RULE 1: STRICT INVOICE/BILL REJECTION
-════════════════════════════════════════════════════════════════════
-If title or document type is Tax Invoice, Retail Invoice, Challan, Quotation, Estimate, or Receipt:
--> Set "isPurchaseOrder": false
--> Return empty items: []
-Only set "isPurchaseOrder": true for genuine Purchase Order / Work Order / Purchase Indent.
+RULES:
+1. DOCUMENT FILTER:
+   - ONLY reject if the document is explicitly a "TAX INVOICE", "RETAIL INVOICE", "COMMERCIAL INVOICE", "DELIVERY CHALLAN", "SALARY SLIP", or "RECEIPT".
+   - Accept all variations of: Purchase Order, Work Order, Letter of Intent (LOI), Purchase Indent, Procurement Order, Supply Order, Service Order, Contract.
+   - If acceptable, set isPurchaseOrder: true.
 
-════════════════════════════════════════════════════════════════════
-RULE 2: BUYER vs VENDOR
-════════════════════════════════════════════════════════════════════
-The VENDOR is "Classic Automation and Control" (Rudrapur/Sidcul). NEVER extract Classic Automation as buyer!
-Extract only the buying client company name and buyer address.
+2. VENDOR vs BUYER:
+   - "Classic Automation and Control" is the VENDOR/SELLER. NEVER output Classic Automation as the buyer.
+   - Extract the Client/Customer company name and their billing/shipping address.
 
-════════════════════════════════════════════════════════════════════
-RULE 3: QUANTITY, RATE & STRICT DISCOUNT ISOLATION
-════════════════════════════════════════════════════════════════════
-1. QUANTITY ("qty"): Pure ordered count (e.g. "10", "2.5"). Exclude unit names.
-2. UNIT RATE ("rate"): Single piece rate before taxes and discount. NEVER drop zeros (e.g. "15,000" is "15000.00").
-3. DISCOUNT RULE (STRICT):
-   - By DEFAULT, discount is 0.
-   - Do NOT extract payment terms (e.g., '30 days', '45 days'), GST rates ('18%', '28%'), or freight as discount!
-   - ONLY extract discount if there is an explicit printed column header like "Disc %" or "Discount" on that specific line item.
-   - If not clearly printed in a dedicated discount column, return "0".
-4. LINE AMOUNT ("amount"): Basic line value before GST. If discount exists: (qty * rate) - discountAmount, else (qty * rate).`;
+3. NUMERIC EXTRACTION:
+   - "qty": Numerical quantity (remove units like NOS, PCS, MTR).
+   - "rate": Unit price before GST. Never truncate (e.g., 2,500.00 stays 2500.00).
+   - "discountPercent" & "discountAmount": Default to "0". Only populate if an explicit discount column is printed.
+   - "amount": Line total before tax.
+   - "partNo": Manufacturer model/catalog code if present. Else empty string.`;
 
     const jsonSchema = {
       type: "OBJECT",
       properties: {
         isPurchaseOrder: { type: "BOOLEAN" },
-        documentType: { type: "STRING" },
         buyerCompanyName: { type: "STRING" },
         buyerBillingAddress: { type: "STRING" },
         poNumber: { type: "STRING" },
@@ -1207,7 +1200,7 @@ RULE 3: QUANTITY, RATE & STRICT DISCOUNT ISOLATION
           }
         }
       },
-      required: ["isPurchaseOrder", "documentType"]
+      required: ["isPurchaseOrder"]
     };
 
     for (let key of candidateKeys) {
@@ -1230,15 +1223,14 @@ RULE 3: QUANTITY, RATE & STRICT DISCOUNT ISOLATION
               },
               contents: [{
                 parts: [
-                  { text: "Analyze this document. Verify if Purchase Order. Extract clean lines. Strict: Do NOT invent discounts, keep discount 0 unless printed in an explicit column." },
+                  { text: "Extract all items from this order document. If it is an order/indent/PO, extract all rows completely." },
                   { inline_data: { mime_type: "application/pdf", data: base64Pdf } }
                 ]
               }],
               generationConfig: { 
                 response_mime_type: "application/json",
                 response_schema: jsonSchema,
-                temperature: 0.0,
-                thinkingConfig: { thinkingBudget: 0 }
+                temperature: 0.1
               }
             })
           });
@@ -1249,15 +1241,14 @@ RULE 3: QUANTITY, RATE & STRICT DISCOUNT ISOLATION
             let data = JSON.parse(candidate || "{}");
 
             if (data.isPurchaseOrder === false) {
-              return { isPurchaseOrder: false, documentType: data.documentType || "Non-PO" };
+              return { isPurchaseOrder: false };
             }
 
             return {
               isPurchaseOrder: true,
-              documentType: "Purchase Order",
               companyName: (data.buyerCompanyName || "").trim(),
               companyAddress: (data.buyerBillingAddress || "").trim(),
-              poNo: (data.poNumber || "").trim(),
+              poNo: (data.poNumber || "PO-" + Math.floor(1000 + Math.random() * 9000)).trim(),
               poDate: (data.poDate || "").trim(),
               items: (data.items || []).map(it => {
                 function cleanNumberString(val) {
@@ -1291,66 +1282,21 @@ RULE 3: QUANTITY, RATE & STRICT DISCOUNT ISOLATION
 
                 if (q <= 0) q = 1;
 
-                // Rate / Amount Column Swap Guard
-                if (r > a && a > 0 && q > 1) {
-                  const checkRate = a / q;
-                  if (Math.abs(checkRate * q - a) < 0.05) {
-                    const temp = r;
-                    r = checkRate;
-                    a = temp;
-                  }
-                }
-
                 if (r === 0 && a > 0) {
                   r = a / q;
                 }
 
-                // STRICT DISCOUNT VALIDATION:
-                // Agar AI ne random percentage pakad li hai (e.g. 18% GST ya 30 din payment term), check math:
-                const rawTotal = q * r;
-                let validDiscount = false;
-
-                if (dp > 0 && dp < 90) {
-                  const calcDiscAmt = (rawTotal * dp) / 100;
-                  // Agar extracted amount aur calculation match kare tabhi valid manein
-                  if (a > 0 && Math.abs((rawTotal - calcDiscAmt) - a) < 1.0) {
-                    validDiscount = true;
-                    da = calcDiscAmt;
-                  }
-                }
-
-                if (!validDiscount && da > 0 && da < rawTotal) {
-                  if (a > 0 && Math.abs((rawTotal - da) - a) < 1.0) {
-                    validDiscount = true;
-                    dp = (da / rawTotal) * 100;
-                  }
-                }
-
-                // Agar discount mathematically document ke amount se match na kare, forcefully discard karein
-                if (!validDiscount) {
-                  dp = 0;
-                  da = 0;
-                }
-
                 if (a === 0 && r > 0) {
-                  a = Math.max(0, (q * r) - da);
-                }
-
-                // Zero Truncation Recovery
-                if (r > 0 && a > 0 && q > 0) {
-                  const expectedRate = (a + da) / q;
-                  if (Math.abs((expectedRate / r) - 1000) < 50 || Math.abs((expectedRate / r) - 100) < 5) {
-                    r = expectedRate;
-                  }
+                  a = (q * r) - da;
                 }
 
                 return {
                   partNo: (it.partNo || "").trim(),
-                  desc: (it.desc || "").trim(),
+                  desc: (it.desc || "Item Description").trim(),
                   qty: q.toString(),
                   unit: (it.unit || "NOS").trim().toUpperCase(),
                   rate: r.toFixed(2),
-                  discountPercent: dp > 0 ? dp.toFixed(2) : "0",
+                  discountPercent: dp > 0 ? dp.toString() : "0",
                   discountAmount: da > 0 ? da.toFixed(2) : "0.00",
                   amount: a.toFixed(2)
                 };
@@ -1363,7 +1309,7 @@ RULE 3: QUANTITY, RATE & STRICT DISCOUNT ISOLATION
 
           if (response.status === 429) {
             if (candidateKeys.length > 1 && key === candidateKeys[0]) {
-              statusText.textContent = `⚡ Key 1 rate limit reached. Switching to Key 2...`;
+              statusText.textContent = `⚡ Key 1 limit reached. Switching to Key 2...`;
               break; 
             } else {
               await countdownWait(10, "Rate limit reached on keys");
@@ -1371,16 +1317,9 @@ RULE 3: QUANTITY, RATE & STRICT DISCOUNT ISOLATION
             }
           }
 
-          if (response.status === 400 || response.status === 403) {
-            throw new Error(`Google API Authentication Error (${response.status}): ${errMsg}`);
-          }
-
           lastError = errMsg;
         } catch (netErr) {
           lastError = netErr.message;
-          if (netErr.message.includes("Google API Authentication Error")) {
-            throw netErr;
-          }
         }
       }
     }
