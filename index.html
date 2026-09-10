@@ -735,16 +735,18 @@
     }
   }
 
-  function isExplicitlyNonPoFile(filename) {
-    if (!filename || typeof filename !== 'string') return false;
-    const lower = filename.toLowerCase();
-    
-    const poTerms = ['po', 'purchase', 'order', 'indent', 'wo', 'workorder'];
-    if (poTerms.some(t => lower.includes(t))) return false;
+function isExplicitlyNonPoFile(filename) {
+  if (!filename || typeof filename !== 'string') return false;
+  const lower = filename.toLowerCase();
 
-    const blockedTerms = ['tax invoice', 'retail invoice', 'delivery challan', 'salary slip', 'receipt_'];
-    return blockedTerms.some(t => lower.includes(t));
-  }
+  // Agar PO-related keyword hai toh bilkul skip mat karo
+  const poTerms = ['po', 'purchase', 'order', 'indent', 'wo', 'workorder'];
+  if (poTerms.some(t => lower.includes(t))) return false;
+
+  // Sirf tabhi reject karo jab pakka pata ho ki bill/salary hai
+  const blockedTerms = ['tax invoice', 'retail invoice', 'salary slip', 'receipt_'];
+  return blockedTerms.some(t => lower.includes(t));
+}
 
   function detectAndValidatePartNumber(aiPartNo, descText) {
     function cleanCandidate(c) {
@@ -1216,177 +1218,151 @@
     });
   }
 
-  async function callGeminiAIWithRetry(initialKey, allKeysList, base64Pdf) {
-    let candidateKeys = [initialKey, ...allKeysList.filter(k => k !== initialKey)];
-    let lastError = null;
+ async function callGeminiAIWithRetry(initialKey, allKeysList, base64Pdf) {
+  let candidateKeys = [initialKey, ...allKeysList.filter(k => k !== initialKey)];
+  let lastError = null;
 
-    const systemInstruction = `You are an expert ERP Purchase Order Data Extractor.
-Extract procurement items from the document.
+  // Base64 agar header ke saath ho to clean karein
+  const cleanBase64 = base64Pdf.includes(',') ? base64Pdf.split(',')[1] : base64Pdf;
 
+  const systemInstruction = `You are an expert ERP Purchase Order Data Extractor.
+Extract procurement items from the purchase document.
 RULES:
-1. ONLY reject (set isPurchaseOrder: false) if the file is explicitly an invoice, delivery challan, or salary receipt.
-2. If it is a Purchase Order, Indent, Work Order, LOI, or Supply Contract, ALWAYS set isPurchaseOrder: true.
-3. Classic Automation is the vendor/seller. Extract the CLIENT / BUYER company name and address.
-4. Always extract the items table: part number, description, quantity, unit rate, and total amount.
-5. You MUST return ONLY a clean, valid JSON object matching the requested schema.`;
+1. Always set isPurchaseOrder to true for Purchase Orders, Indents, Work Orders, and Quotation Orders. Only set to false if it is purely a Tax Invoice or Salary Slip.
+2. Extract the Buyer/Client organization name (Classic Automation is vendor/supplier).
+3. Extract all line items: part number, description, quantity, unit rate, and total amount.
+4. Return strict JSON.`;
 
-    const jsonSchema = {
-      type: "OBJECT",
-      properties: {
-        isPurchaseOrder: { type: "BOOLEAN" },
-        buyerCompanyName: { type: "STRING" },
-        buyerBillingAddress: { type: "STRING" },
-        poNumber: { type: "STRING" },
-        poDate: { type: "STRING" },
+  const jsonSchema = {
+    type: "OBJECT",
+    properties: {
+      isPurchaseOrder: { type: "BOOLEAN" },
+      buyerCompanyName: { type: "STRING" },
+      buyerBillingAddress: { type: "STRING" },
+      poNumber: { type: "STRING" },
+      poDate: { type: "STRING" },
+      items: {
+        type: "ARRAY",
         items: {
-          type: "ARRAY",
-          items: {
-            type: "OBJECT",
-            properties: {
-              partNo: { type: "STRING" },
-              desc: { type: "STRING" },
-              qty: { type: "STRING" },
-              unit: { type: "STRING" },
-              rate: { type: "STRING" },
-              discountPercent: { type: "STRING" },
-              discountAmount: { type: "STRING" },
-              amount: { type: "STRING" }
-            }
-          }
-        }
-      },
-      required: ["isPurchaseOrder"]
-    };
-
-    for (let key of candidateKeys) {
-      const cleanKey = key.trim();
-
-      for (let rawModel of FAST_MODELS) {
-        if (abortRequested) throw new Error("Operation cancelled by user.");
-
-        const cleanModel = rawModel.replace(/^models\//, "");
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent?key=${cleanKey}`;
-
-        try {
-          const response = await fetch(url, {
-            method: "POST",
-            headers: { 
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-              system_instruction: {
-                parts: [{ text: systemInstruction }]
-              },
-              contents: [{
-                parts: [
-                  { text: "Extract all items from this purchase document in strict JSON." },
-                  { inline_data: { mime_type: "application/pdf", data: base64Pdf } }
-                ]
-              }],
-              generationConfig: { 
-                response_mime_type: "application/json",
-                response_schema: jsonSchema,
-                temperature: 0.1
-              }
-            })
-          });
-
-          if (response.ok) {
-            const resJson = await response.json();
-            let candidateText = resJson.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
-            
-            // Markdown fences safai (agar model ```json include kare)
-            candidateText = candidateText.replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim();
-            
-            let data = {};
-            try {
-              data = JSON.parse(candidateText);
-            } catch (e) {
-              // Regex fallback agar JSON slightly truncated ho
-              const match = candidateText.match(/\{[\s\S]*\}/);
-              if (match) data = JSON.parse(match[0]);
-            }
-
-            if (data.isPurchaseOrder === false) {
-              return { isPurchaseOrder: false };
-            }
-
-            return {
-              isPurchaseOrder: true,
-              companyName: (data.buyerCompanyName || "").trim(),
-              companyAddress: (data.buyerBillingAddress || "").trim(),
-              poNo: (data.poNumber || "PO-" + Math.floor(1000 + Math.random() * 9000)).trim(),
-              poDate: (data.poDate || "").trim(),
-              items: (data.items || []).map(it => {
-                function cleanNumberString(val) {
-                  if (val === undefined || val === null) return "0";
-                  let str = String(val).trim().replace(/[₹RsINR$\s/A-Za-z]/g, '');
-
-                  if (str.includes(',') && str.includes('.')) {
-                    if (str.lastIndexOf('.') > str.lastIndexOf(',')) {
-                      str = str.replace(/,/g, '');
-                    } else {
-                      str = str.replace(/\./g, '').replace(',', '.');
-                    }
-                  } else if (str.includes(',')) {
-                    const commaParts = str.split(',');
-                    if (commaParts.length === 2 && commaParts[1].length === 2) {
-                      str = commaParts[0] + '.' + commaParts[1];
-                    } else {
-                      str = str.replace(/,/g, '');
-                    }
-                  }
-                  str = str.replace(/[^0-9.]/g, '');
-                  return str || "0";
-                }
-
-                let q = parseFloat(cleanNumberString(it.qty)) || 1;
-                let r = parseFloat(cleanNumberString(it.rate)) || 0;
-                let dp = parseFloat(cleanNumberString(it.discountPercent)) || 0;
-                let da = parseFloat(cleanNumberString(it.discountAmount)) || 0;
-                let a = parseFloat(cleanNumberString(it.amount)) || 0;
-
-                if (q <= 0) q = 1;
-                if (r === 0 && a > 0) r = a / q;
-                if (a === 0 && r > 0) a = (q * r) - da;
-
-                return {
-                  partNo: (it.partNo || "").trim(),
-                  desc: (it.desc || "Item Description").trim(),
-                  qty: q.toString(),
-                  unit: (it.unit || "NOS").trim().toUpperCase(),
-                  rate: r.toFixed(2),
-                  discountPercent: dp > 0 ? dp.toString() : "0",
-                  discountAmount: da > 0 ? da.toFixed(2) : "0.00",
-                  amount: a.toFixed(2)
-                };
-              })
-            };
-          }
-
-          const errData = await response.json().catch(() => ({}));
-          const errMsg = errData.error?.message || `HTTP ${response.status}`;
-
-          if (response.status === 429) {
-            if (candidateKeys.length > 1 && key === candidateKeys[0]) {
-              statusText.textContent = `⚡ Key 1 limit reached. Switching to Key 2...`;
-              break; 
-            } else {
-              await countdownWait(10, "Rate limit reached on keys");
-              continue;
-            }
-          }
-
-          lastError = errMsg;
-        } catch (netErr) {
-          lastError = netErr.message;
+          type: "OBJECT",
+          properties: {
+            partNo: { type: "STRING" },
+            desc: { type: "STRING" },
+            qty: { type: "STRING" },
+            unit: { type: "STRING" },
+            rate: { type: "STRING" },
+            discountPercent: { type: "STRING" },
+            discountAmount: { type: "STRING" },
+            amount: { type: "STRING" }
+          },
+          required: ["desc", "qty"]
         }
       }
-    }
-    throw new Error(lastError || "Extraction failed on all provided API keys.");
-  }
+    },
+    required: ["isPurchaseOrder", "items"]
+  };
 
-  function addRowToTable(data = {}) {
+  for (let key of candidateKeys) {
+    const cleanKey = key.trim();
+
+    for (let rawModel of FAST_MODELS) {
+      if (abortRequested) throw new Error("Operation cancelled by user.");
+
+      const cleanModel = rawModel.replace(/^models\//, "");
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent?key=${cleanKey}`;
+
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{
+              role: "user",
+              parts: [
+                { text: systemInstruction },
+                {
+                  inlineData: {
+                    mimeType: "application/pdf",
+                    data: cleanBase64
+                  }
+                }
+              ]
+            }],
+            generationConfig: {
+              responseMimeType: "application/json",
+              responseSchema: jsonSchema,
+              temperature: 0.1
+            }
+          })
+        });
+
+        if (response.ok) {
+          const resJson = await response.json();
+          let candidateText = resJson.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+          candidateText = candidateText.replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim();
+
+          let data = {};
+          try {
+            data = JSON.parse(candidateText);
+          } catch (e) {
+            const match = candidateText.match(/\{[\s\S]*\}/);
+            if (match) data = JSON.parse(match[0]);
+          }
+
+          if (data.isPurchaseOrder === false) {
+            return { isPurchaseOrder: false };
+          }
+
+          return {
+            isPurchaseOrder: true,
+            companyName: (data.buyerCompanyName || "").trim(),
+            companyAddress: (data.buyerBillingAddress || "").trim(),
+            poNo: (data.poNumber || "PO-" + Math.floor(1000 + Math.random() * 9000)).trim(),
+            poDate: (data.poDate || "").trim(),
+            items: (data.items || []).map(it => {
+              function cleanNumber(val) {
+                if (!val) return "0";
+                return String(val).replace(/[^0-9.]/g, '') || "0";
+              }
+
+              let q = parseFloat(cleanNumber(it.qty)) || 1;
+              let r = parseFloat(cleanNumber(it.rate)) || 0;
+              let dp = parseFloat(cleanNumber(it.discountPercent)) || 0;
+              let da = parseFloat(cleanNumber(it.discountAmount)) || 0;
+              let a = parseFloat(cleanNumber(it.amount)) || 0;
+
+              if (r === 0 && a > 0) r = a / q;
+              if (a === 0 && r > 0) a = (q * r) - da;
+
+              return {
+                partNo: (it.partNo || "").trim(),
+                desc: (it.desc || "Item Description").trim(),
+                qty: q.toString(),
+                unit: (it.unit || "NOS").trim().toUpperCase(),
+                rate: r.toFixed(2),
+                discountPercent: dp > 0 ? dp.toString() : "0",
+                discountAmount: da > 0 ? da.toFixed(2) : "0.00",
+                amount: a.toFixed(2)
+              };
+            })
+          };
+        }
+
+        const errData = await response.json().catch(() => ({}));
+        const errMsg = errData.error?.message || `HTTP ${response.status}`;
+
+        if (response.status === 429) {
+          await countdownWait(8, "Rate limit hit");
+          continue;
+        }
+        lastError = errMsg;
+      } catch (netErr) {
+        lastError = netErr.message;
+      }
+    }
+  }
+  throw new Error(lastError || "Extraction failed on all provided models/keys.");
+}  function addRowToTable(data = {}) {
     const tr = document.createElement('tr');
     const thElements = headerRow.querySelectorAll('th');
 
