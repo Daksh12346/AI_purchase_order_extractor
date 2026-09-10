@@ -810,7 +810,8 @@
       if (isExplicitlyNonPoFile(fileName)) {
         skippedCount++;
         statusText.textContent = `Skipped non-order document: ${fileName}`;
-        await sleep(50);
+        // Ek PDF ke baad agle PDF ke beech 2.5s ka gap rakhein taaki rate limit trigger hi na ho
+          await sleep(2500);
         continue;
       }
 
@@ -1162,9 +1163,10 @@ RULE 4: MATHEMATICAL PRECISION FOR LINE ITEM AMOUNTS
 
           const errData = await response.json().catch(() => ({}));
           const errMsg = errData.error?.message || `HTTP ${response.status}`;
-          
-          if (response.status === 429) {
-            await countdownWait(15, "Rate limit reached");
+         if (response.status === 429) {
+            // Attempt 1 par 20s aur Attempt 2 par 35s wait karega taaki Google ka 60s quota reset ho sake
+            const backoffSeconds = attempt === 1 ? 20 : 35;
+            await countdownWait(backoffSeconds, "API Quota limit hit. Resetting window");
             continue;
           }
           
