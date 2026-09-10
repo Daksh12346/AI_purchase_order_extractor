@@ -26,7 +26,7 @@
     }
 
     .container {
-      max-width: 1600px;
+      max-width: 1650px;
       margin: 0 auto;
     }
 
@@ -418,7 +418,7 @@
 <div class="container">
   <div class="header-box">
     <h1>AI Purchase Order Extractor</h1>
-    <p class="subtitle">Dual-Key Parallel Speed Engine (Separate PDF PO Date & DD/MM/YY Gmail Date)</p>
+    <p class="subtitle">Dual-Key Industrial Procurement Engine (Strict Mathematical Re-Check & Part No Extraction)</p>
 
     <!-- 2 USER-INPUT API KEY BOXES -->
     <div class="api-key-container">
@@ -641,7 +641,6 @@
     return `${year}-${month}-${day}`;
   }
 
-  // Format Gmail Date specifically to DD/MM/YY
   function formatGmailDateToDDMMYY(isoDateStr) {
     if (!isoDateStr) return "";
     const parts = String(isoDateStr).trim().split('-');
@@ -718,34 +717,59 @@
     return blockedTerms.some(t => lower.includes(t));
   }
 
-  // STRICT PART NUMBER DETECTOR
+  // ROBUST INDUSTRIAL PART NUMBER EXTRACTION
   function detectAndValidatePartNumber(aiPartNo, descText) {
-    let candidate = (aiPartNo || "").trim();
-
-    function isValidIndustrialCode(code) {
-      if (!code || typeof code !== 'string') return false;
-      let c = code.trim();
-      if (/^(NA|N\/A|NIL|NONE|NULL|-|_|\.|\/)$/i.test(c)) return false;
-      if (/^(SCHNEIDER|SIEMENS|L&T|ABB|HAVELLS|LEGRAND|NOS|SET|PCS|EA|MTR|KG|LOT|NO|PKT|PAIR)$/i.test(c)) return false;
-      if (/^(ITEM\b|ITM\b|MAT\b|IND\b|CODE\b|SR\b|SL\b|S\.NO|POS\b|LINE\b)/i.test(c)) return false;
-      if (/^(\d+P|\d+A|\d+V|\d+KW|\d+HP|\d+K|\d+-WAY|\d+MM|\d+X\d+|\d+SQMM)$/i.test(c)) return false;
-      if (/^\d{6,8}$/.test(c)) return false;
-      return /^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9\-\/]{4,25}$/.test(c);
+    function cleanCandidate(c) {
+      if (!c) return "";
+      return c.trim().replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, '');
     }
 
-    if (candidate && isValidIndustrialCode(candidate)) {
-      return candidate;
+    function isBlacklisted(str) {
+      if (!str) return true;
+      const s = str.toUpperCase().trim();
+      if (/^(NA|N\/A|NIL|NONE|NULL|-|_|\.|\/)$/i.test(s)) return true;
+      if (/^(SCHNEIDER|SIEMENS|L&T|ABB|HAVELLS|LEGRAND|OMRON|PHOENIX|WAGO|EATON|DELTA|MITSUBISHI|DANFOSS)$/i.test(s)) return true;
+      if (/^(NOS|SET|PCS|EA|MTR|KG|LOT|NO|PKT|PAIR|METRE|COIL|ROLL|BAG|BOX|PACK)$/i.test(s)) return true;
+      if (/^(ITEM|ITM|MAT|IND|CODE|SR|SL|SNO|LINE|POS|DESCR|TYPE|MAKE|BRAND|MODEL|SIZE|RATING)\b/i.test(s)) return true;
+      if (/^(\d+P|\d+A|\d+V|\d+KW|\d+HP|\d+K|\d+-WAY|\d+MM|\d+X\d+|\d+SQMM|\d+VAC|\d+VDC|\d+AMP|\d+POLE)$/i.test(s)) return true;
+      if (/^\d{6,8}$/.test(s)) return true; // Pure HSN / SAC Code
+      if (/^\d{1,4}$/.test(s)) return true; // Plain short numbers (Serial Nos)
+      return false;
     }
 
+    function isAuthenticCode(code) {
+      if (!code || isBlacklisted(code)) return false;
+      const c = code.trim();
+      if (c.length < 4 || c.length > 28) return false;
+
+      // Pattern 1: Alphanumeric standard codes (e.g., LC1D25M7, 3RT2026-1BB40, A9F74216, 3VA1116-3ED36-0AA0)
+      if (/^[A-Za-z0-9]+(?:[-/.][A-Za-z0-9]+)+$/.test(c)) return true;
+      // Pattern 2: Contains letters and numbers mixed
+      if (/^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9]{4,25}$/.test(c)) return true;
+      // Pattern 3: Standard 5-9 digit catalog numbers (e.g. 1002345, 520034) if not pure HSN
+      if (/^[A-Z]{2,5}[0-9]{2,6}$/i.test(c)) return true;
+
+      return false;
+    }
+
+    // Check candidate passed from dedicated column
+    let colCandidate = cleanCandidate(aiPartNo);
+    if (colCandidate && isAuthenticCode(colCandidate)) {
+      return colCandidate;
+    }
+
+    // Check inside Description text
     if (descText && typeof descText === 'string') {
-      const words = descText.split(/[\s,;()]+/);
-      for (let word of words) {
-        let cleanWord = word.trim().replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, '');
-        if (isValidIndustrialCode(cleanWord)) {
-          return cleanWord;
+      // Split by whitespace and common punctuation, keeping hyphens and slashes intact
+      const tokens = descText.split(/[\s,;()\[\]{}|]+/);
+      for (let t of tokens) {
+        let cleanToken = cleanCandidate(t);
+        if (isAuthenticCode(cleanToken)) {
+          return cleanToken;
         }
       }
     }
+
     return "";
   }
 
@@ -952,7 +976,6 @@
             displayedPOs.add(extractedPoNo);
           }
 
-          // Strict separate dates: Gmail Date in DD/MM/YY format & Document Date as original text
           const formattedGmailDate = formatGmailDateToDDMMYY(fileObj.email_date);
           const rawDocPoDate = extractedData.poDate || "";
 
@@ -1133,24 +1156,27 @@ RULE 2: BUYER vs VENDOR DISTINCTION
 RULE 3: PO DATE (PDF DOCUMENT DATE)
 ════════════════════════════════════════════════════════════════════
 - Under poDate, extract the EXACT date printed on the Purchase Order document next to labels like "PO Date:", "Order Date:", "Date:".
-- Output the date EXACTLY AS PRINTED in the PDF without converting or reformatting (e.g., if printed as "15.08.2026" or "10-Aug-2026", keep it as is).
+- Output the date EXACTLY AS PRINTED in the PDF without converting (e.g. "15.08.2026").
 
 ════════════════════════════════════════════════════════════════════
-RULE 4: PART NUMBER LOCATION CONSTRAINT
+RULE 4: PART NUMBER EXTRACTION
 ════════════════════════════════════════════════════════════════════
 The manufacturer Part Number / Catalog Number / Model Number exists ONLY in two possible places:
 1. Under a dedicated table column named: "Part No", "Catalog No", "Cat No", "Model No", "Item Code".
 2. OR embedded directly inside the "Item Description" text of that specific item line.
+- Return the exact catalog code (e.g. "LC1D25M7", "3RT2026-1BB40", "A9F74216").
 - If neither contains an authentic manufacturer part code, RETURN STRICTLY AN EMPTY STRING "".
-- NEVER extract HSN codes or internal serial numbers.
+- NEVER extract HSN codes (e.g. 85362030) or line numbers (e.g. 1, 2, 10).
 
 ════════════════════════════════════════════════════════════════════
 RULE 5: PRECISE TABLE COLUMN ANCHORING (QUANTITY vs RATE vs AMOUNT)
 ════════════════════════════════════════════════════════════════════
 1. QUANTITY ("qty"): Numeric value only (e.g., "10", "2.5"). Strip "NOS", "SET".
-2. UNIT RATE ("rate"): Price of a single unit before tax. Clean number only. Never copy Line Amount or Grand Total here.
+2. UNIT RATE ("rate"): Price of a SINGLE unit before tax and discount.
+   - Column labels: "Unit Rate", "Rate", "Basic Price", "Price/Unit", "Unit Price".
+   - CRITICAL: Do NOT put the Line Total / Amount in the Rate! Clean number only (e.g., "1250.00").
 3. DISCOUNT ("discountPercent", "discountAmount"): Explicit line discount if printed, else "0".
-4. LINE AMOUNT ("amount"): Basic taxable line total = (qty * rate) - discountAmount. Never Grand Total.`;
+4. LINE AMOUNT ("amount"): Basic taxable line total = (qty * rate) - discountAmount. Never PO Grand Total.`;
 
     const jsonSchema = {
       type: "OBJECT",
@@ -1166,7 +1192,7 @@ RULE 5: PRECISE TABLE COLUMN ANCHORING (QUANTITY vs RATE vs AMOUNT)
           items: {
             type: "OBJECT",
             properties: {
-              partNo: { type: "STRING", description: "Manufacturer catalog/model number from the dedicated column or within the description. Strictly empty string \"\" if not present." },
+              partNo: { type: "STRING", description: "Manufacturer catalog/model number from dedicated column or description. Empty string if not present." },
               desc: { type: "STRING", description: "Complete item description." },
               qty: { type: "STRING", description: "Numeric quantity only, no unit strings." },
               unit: { type: "STRING", description: "Unit of measurement (e.g., NOS, SET, MTR, EA)." },
@@ -1226,45 +1252,59 @@ RULE 5: PRECISE TABLE COLUMN ANCHORING (QUANTITY vs RATE vs AMOUNT)
               poNo: (data.poNumber || "").trim(),
               poDate: (data.poDate || "").trim(),
               items: (data.items || []).map(it => {
-                let rawQty = String(it.qty || "1").replace(/[^0-9.]/g, '') || "1";
-                let rawRate = String(it.rate || "0").replace(/[^0-9.]/g, '') || "0";
-                let rawDiscPct = String(it.discountPercent || "0").replace(/[^0-9.]/g, '') || "0";
-                let rawDiscAmt = String(it.discountAmount || "0").replace(/[^0-9.]/g, '') || "0";
-                let rawAmt = String(it.amount || "0").replace(/[^0-9.]/g, '') || "0";
+                // Strict Sanitization of Numerics
+                function sanitizeNumber(val) {
+                  if (!val) return "0";
+                  let s = String(val).replace(/,/g, '').replace(/[^0-9.]/g, '');
+                  let parts = s.split('.');
+                  if (parts.length > 2) s = parts[0] + '.' + parts.slice(1).join('');
+                  return s || "0";
+                }
 
-                let q = parseFloat(rawQty) || 1;
-                let r = parseFloat(rawRate) || 0;
-                let dp = parseFloat(rawDiscPct) || 0;
-                let da = parseFloat(rawDiscAmt) || 0;
-                let a = parseFloat(rawAmt) || 0;
+                let q = parseFloat(sanitizeNumber(it.qty)) || 1;
+                let r = parseFloat(sanitizeNumber(it.rate)) || 0;
+                let dp = parseFloat(sanitizeNumber(it.discountPercent)) || 0;
+                let da = parseFloat(sanitizeNumber(it.discountAmount)) || 0;
+                let a = parseFloat(sanitizeNumber(it.amount)) || 0;
 
                 if (q <= 0) q = 1;
 
+                // Discount auto-calculation
                 if (dp > 0 && da === 0 && r > 0) {
                   da = (q * r * dp) / 100;
                 }
 
+                // MATHEMATICAL RE-CHECK LOGIC FOR RATE & AMOUNT
+                // 1. Agar Rate aur Amount barabar hain aur Qty > 1 hai -> Rate column shifted tha
                 if (q > 1 && a > 0 && Math.abs(r - a) < 0.05) {
-                  r = a / q;
-                }
-
-                if (r === 0 && a > 0 && q > 0) {
                   r = (a + da) / q;
                 }
 
-                const expectedAmt = (q * r) - da;
+                // 2. Agar Rate missing hai aur Amount diya hai
+                if (r === 0 && a > 0) {
+                  r = (a + da) / q;
+                }
 
+                // 3. Agar Amount missing hai aur Rate diya hai
                 if (a === 0 && r > 0) {
-                  a = Math.max(0, expectedAmt);
-                } else if (a > 0 && r > 0 && q > 1) {
-                  if (a > (expectedAmt * 1.5)) {
-                    a = Math.max(0, expectedAmt);
+                  a = Math.max(0, (q * r) - da);
+                }
+
+                // 4. Rate x Qty vs Amount reconciliation
+                const calculatedExpectedAmt = (q * r) - da;
+                if (r > 0 && a > 0 && q > 1) {
+                  // Agar extracted amount expected amount se drastically mismatch ho (jaise Grand Total ho)
+                  if (Math.abs(a - calculatedExpectedAmt) > (calculatedExpectedAmt * 0.4)) {
+                    // Check if 'a' is actually a line total that was mistakenly swapped
+                    if (Math.abs((a / q) - r) > 1) {
+                      a = calculatedExpectedAmt;
+                    }
                   }
                 }
 
                 return {
-                  partNo: it.partNo || "",
-                  desc: it.desc || "",
+                  partNo: (it.partNo || "").trim(),
+                  desc: (it.desc || "").trim(),
                   qty: q.toString(),
                   unit: (it.unit || "NOS").trim().toUpperCase(),
                   rate: r.toFixed(2),
