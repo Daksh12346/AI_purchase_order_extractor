@@ -97,7 +97,7 @@ def sync_fetch_po_pdfs(req: GmailFetchRequest) -> dict:
         raise HTTPException(status_code=401, detail=f"Gmail Login Failed: {str(e)}")
 
     try:
-        gmail_query_parts = ["filename:pdf", "has:attachment"]
+        gmail_query_parts = ["has:attachment", "filename:pdf"]
 
         if req.date_from and req.date_from.strip():
             d_from = req.date_from.strip().replace("-", "/")
@@ -113,12 +113,15 @@ def sync_fetch_po_pdfs(req: GmailFetchRequest) -> dict:
 
         if req.query and req.query.strip():
             raw_q = req.query.strip().replace('"', '').replace("'", "")
-            gmail_query_parts.append(f"({raw_q})")
+            gmail_query_parts.append(f"{raw_q}")
 
         full_raw_query = " ".join(gmail_query_parts)
-        
-        # Proper Gmail IMAP Raw query formatting
-        status, message_numbers = mail.uid("search", None, "X-GM-RAW", full_raw_query)
+
+        # RFC IMAP Syntax wrap
+        status, message_numbers = mail.uid("search", None, f'X-GM-RAW "{full_raw_query}"')
+
+        if status != "OK":
+            status, message_numbers = mail.uid("search", None, "ALL")
 
         if status != "OK" or not message_numbers or not message_numbers[0]:
             return {"files": [], "message": "No emails found matching criteria."}
@@ -149,7 +152,6 @@ def sync_fetch_po_pdfs(req: GmailFetchRequest) -> dict:
                         email_date_str = ""
 
                 for part in msg.walk():
-                    # Multipart containers skip karein
                     if part.get_content_maintype() == "multipart":
                         continue
 
@@ -162,7 +164,6 @@ def sync_fetch_po_pdfs(req: GmailFetchRequest) -> dict:
 
                     filename = decode_mime_words(filename).strip()
 
-                    # Check for valid PDF attachment
                     if filename.lower().endswith(".pdf"):
                         payload = part.get_payload(decode=True)
                         if payload:
@@ -204,7 +205,7 @@ def serve_ui():
         if os.path.exists(target):
             with open(target, "r", encoding="utf-8") as f:
                 return f.read()
-    return "<h1>HTML file not found in current directory! Place index.html or odd.html here.</h1>"
+    return "<h1>Place index.html in the same directory as this script.</h1>"
 
 
 @app.get("/health")
@@ -237,5 +238,4 @@ async def fetch_po_pdfs(req: GmailFetchRequest):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5050))
-    # Direct app reference to prevent module import mismatch
     uvicorn.run(app, host="0.0.0.0", port=port, reload=False)
