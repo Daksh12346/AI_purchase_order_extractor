@@ -850,7 +850,7 @@
       statusText.textContent = `[${isHiddenKey ? "Key 1 (Default)" : "Key 2 (User)"}] Analyzing [${f + 1}/${fileList.length}]: ${fileName}...`;
 
       try {
-        const extractedData = await callGeminiAIWithRetry(activeApiKey, fileObj.base64);
+       const extractedData = await callGeminiAIWithRetry(keysList, fileObj.base64)
 
         if (!extractedData || extractedData.isPurchaseOrder === false) {
           skippedCount++;
@@ -1047,43 +1047,36 @@
       reader.onerror = reject;
     });
   }
-
-  async function callGeminiAIWithRetry(apiKey, base64Pdf) {
-    const cleanKey = apiKey.trim();
+async function callGeminiAIWithRetry(keysList, base64Pdf) {
     let lastError = null;
 
     const systemInstruction = `You are a zero-tolerance industrial procurement auditor.
 Carefully review the PDF document page-by-page.
 
 RULE 1: STRICT INVOICE & BILL REJECTION
-- If the document contains any of the following titles:
-  "TAX INVOICE", "INVOICE", "COMMERCIAL INVOICE", "PROFORMA INVOICE", "RETAIL INVOICE",
-  "DELIVERY CHALLAN", "E-WAY BILL", "IRN NO", "BILL OF SUPPLY", "PAYMENT VOUCHER"
-  -> THIS IS A BILL/INVOICE, NOT A PURCHASE ORDER!
-  -> Even if it mentions "Buyer PO Ref" or "Against PO No.", set isPurchaseOrder: false immediately.
+- If document says "TAX INVOICE", "INVOICE", "COMMERCIAL INVOICE", "PROFORMA INVOICE", "RETAIL INVOICE", "DELIVERY CHALLAN", "E-WAY BILL", "IRN NO", "BILL OF SUPPLY":
+  -> Mark isPurchaseOrder: false immediately.
 
 RULE 2: STRICT BUYER VS VENDOR EXTRACTION
-- Under buyerCompanyName, output ONLY the BUYER organization. NEVER output Classic Automation or the vendor name.
-- Under buyerBillingAddress, output the registered/billing plant address of that BUYER company.
+- Under buyerCompanyName, output ONLY the BUYER organization (Customer/Client). NEVER output Classic Automation or the vendor name.
+- Under buyerBillingAddress, output the registered or billing address of that BUYER company.
 
 RULE 3: PO NUMBER EXTRACTION
-- Extract the PO Number / Order Number / Indent Number written next to labels like "P.O. No.", "Order Ref:", "PO #", "SAP PO:".
-- Capture complete numbers (e.g. 4510066200, 0630032011).
-- Do NOT confuse GSTIN (15 characters) or Vendor Code with PO Number.
+- Extract PO Number / Order Number / Indent Number next to "P.O. No.", "Order Ref:", "PO #", "SAP PO:".
+- Capture complete number (e.g. 4510066200, 0630032011). Never output GSTIN or Vendor Code.
 
-RULE 4: MATHEMATICAL PRECISION FOR LINE ITEM AMOUNTS
-- "partNo": Genuine manufacturer part/catalogue number. Blank string "" if not printed.
+RULE 4: MATHEMATICAL PRECISION
+- "partNo": Genuine manufacturer part number. Blank string "" if not printed.
 - "qty": Pure numeric quantity (e.g., "10", "2").
 - "rate": Unit price before tax. Clean numbers only.
-- "discountPercent": Explicit discount percentage if written, else "0".
-- "discountAmount": Explicit discount value if written, else "0".
-- "amount": The exact BASIC line total = (qty * rate) - discountAmount. Never output Grand Total as line amount.`;
+- "discountPercent": Discount percentage or "0".
+- "discountAmount": Discount amount or "0".
+- "amount": Line total = (qty * rate) - discountAmount. Never output Grand Total as line amount.`;
 
     const jsonSchema = {
       type: "OBJECT",
       properties: {
         isPurchaseOrder: { type: "BOOLEAN" },
-        documentType: { type: "STRING" },
         buyerCompanyName: { type: "STRING" },
         buyerBillingAddress: { type: "STRING" },
         poNumber: { type: "STRING" },
@@ -1093,7 +1086,7 @@ RULE 4: MATHEMATICAL PRECISION FOR LINE ITEM AMOUNTS
           items: {
             type: "OBJECT",
             properties: {
-              partNo: { type: "STRING", description: "Manufacturer part number. Blank string if not present." },
+              partNo: { type: "STRING" },
               desc: { type: "STRING" },
               qty: { type: "STRING" },
               unit: { type: "STRING" },
@@ -1109,11 +1102,14 @@ RULE 4: MATHEMATICAL PRECISION FOR LINE ITEM AMOUNTS
       required: ["isPurchaseOrder", "buyerCompanyName", "poNumber", "items"]
     };
 
-    for (let rawModel of FAST_MODELS) {
-      const cleanModel = rawModel.replace(/^models\//, "");
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent?key=${cleanKey}`;
+    // Cycle through all available API keys on 429
+    for (let k = 0; k < keysList.length; k++) {
+      const cleanKey = keysList[k].trim();
 
-      for (let attempt = 1; attempt <= 2; attempt++) {
+      for (let rawModel of FAST_MODELS) {
+        const cleanModel = rawModel.replace(/^models\//, "");
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent?key=${cleanKey}`;
+
         try {
           const response = await fetch(url, {
             method: "POST",
@@ -1122,12 +1118,10 @@ RULE 4: MATHEMATICAL PRECISION FOR LINE ITEM AMOUNTS
               "x-goog-api-key": cleanKey 
             },
             body: JSON.stringify({
-              system_instruction: {
-                parts: [{ text: systemInstruction }]
-              },
+              system_instruction: { parts: [{ text: systemInstruction }] },
               contents: [{
                 parts: [
-                  { text: "Extract all Purchase Order details from this attached document following the exact schema. Strictly remember Classic Automation is the vendor, NOT the buyer." },
+                  { text: "Extract all Purchase Order details strictly following schema. Classic Automation is vendor, not buyer." },
                   { inline_data: { mime_type: "application/pdf", data: base64Pdf } }
                 ]
               }],
@@ -1189,25 +1183,29 @@ RULE 4: MATHEMATICAL PRECISION FOR LINE ITEM AMOUNTS
             };
           }
 
-          const errData = await response.json().catch(() => ({}));
-          const errMsg = errData.error?.message || `HTTP ${response.status}`;
-          
+          // AGAR 429 AAYA: 15s wait mat karo, agle key par turant switch karo!
           if (response.status === 429) {
-            await countdownWait(15, "Rate limit reached on this key");
-            continue;
+            if (keysList.length > 1 && k < keysList.length - 1) {
+              statusText.textContent = `⚡ Key ${k + 1} busy. Auto-switching to Key ${k + 2} instantly...`;
+              break; // Breaks model loop and jumps to next key immediately!
+            } else {
+              // Agar saari keys exhaust ho chuki hain, tabhi pause karega
+              await countdownWait(10, "Both API Keys Quota busy");
+              continue;
+            }
           }
-          
-          lastError = errMsg;
+
+          const errData = await response.json().catch(() => ({}));
+          lastError = errData.error?.message || `HTTP ${response.status}`;
           break;
         } catch (netErr) {
           lastError = netErr.message;
-          await sleep(500);
+          await sleep(400);
         }
       }
     }
-    throw new Error(lastError || "Extraction failed.");
+    throw new Error(lastError || "Extraction failed on all available API keys.");
   }
-
   function addRowToTable(data = {}) {
     const tr = document.createElement('tr');
     const thElements = headerRow.querySelectorAll('th');
