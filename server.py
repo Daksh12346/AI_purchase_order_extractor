@@ -26,8 +26,7 @@ app.add_middleware(
 )
 
 PROCESSED_FILE = "processed_po.json"
-MAX_FETCH_EMAILS = 1000000000
-MAX_FILE_SIZE_MB = 25
+MAX_FILE_SIZE_MB = 30  # Allow large multi-page PO PDFs up to 30MB
 
 
 def get_processed_pos() -> Set[str]:
@@ -86,7 +85,7 @@ def sync_fetch_po_pdfs(req: GmailFetchRequest) -> dict:
 
     if not user_email or not app_password:
         raise HTTPException(
-            status_code=400, detail="Gmail address and App Password are required."
+            status_code=400, detail="Gmail address and 16-character App Password are required."
         )
 
     mail = None
@@ -98,7 +97,6 @@ def sync_fetch_po_pdfs(req: GmailFetchRequest) -> dict:
         raise HTTPException(status_code=401, detail=f"Gmail Login Failed: {str(e)}")
 
     try:
-        # Strict PDF Attachment Search
         gmail_query_parts = ["filename:pdf", "has:attachment"]
 
         if req.date_from and req.date_from.strip():
@@ -124,10 +122,10 @@ def sync_fetch_po_pdfs(req: GmailFetchRequest) -> dict:
             return {"files": [], "message": "No emails found matching criteria."}
 
         email_uids = message_numbers[0].split()
+        # FETCH ALL - NO TRUNCATION / NO BATCH SLICING
         email_uids.reverse()
 
         extracted_files = []
-        seen_attachments = set()
 
         for uid in email_uids:
             res, msg_data = mail.uid("fetch", uid, "(RFC822)")
@@ -164,21 +162,16 @@ def sync_fetch_po_pdfs(req: GmailFetchRequest) -> dict:
 
                     if filename.lower().endswith(".pdf"):
                         payload = part.get_payload(decode=True)
-                        if not payload or len(payload) > MAX_FILE_SIZE_MB * 1024 * 1024:
-                            continue
+                        if payload:
+                            if len(payload) > MAX_FILE_SIZE_MB * 1024 * 1024:
+                                continue
 
-                        # Avoid exact byte duplicate attachments from email reply chains
-                        file_hash = f"{filename}_{len(payload)}"
-                        if file_hash in seen_attachments:
-                            continue
-                        seen_attachments.add(file_hash)
-
-                        b64_str = base64.b64encode(payload).decode("utf-8")
-                        extracted_files.append({
-                            "filename": filename,
-                            "base64": b64_str,
-                            "email_date": email_date_str,
-                        })
+                            b64_str = base64.b64encode(payload).decode("utf-8")
+                            extracted_files.append({
+                                "filename": filename,
+                                "base64": b64_str,
+                                "email_date": email_date_str,
+                            })
 
         saved_pos = [] if req.force_reprocess else list(get_processed_pos())
 
@@ -204,7 +197,7 @@ def serve_ui():
         if os.path.exists(target):
             with open(target, "r", encoding="utf-8") as f:
                 return f.read()
-    return "<h1>HTML file not found!</h1>"
+    return "<h1>HTML file not found in current directory!</h1>"
 
 
 @app.get("/health")
