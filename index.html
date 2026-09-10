@@ -430,23 +430,6 @@
     .btn-danger:hover {
       background: #ffebee;
     }
-
-    .debug-panel {
-      background: #111827;
-      color: #D1FAE5;
-      font-family: monospace;
-      font-size: 11.5px;
-      padding: 12px 16px;
-      border-radius: 8px;
-      margin-top: 14px;
-      max-height: 260px;
-      overflow-y: auto;
-      display: none;
-      white-space: pre-wrap;
-    }
-    .debug-panel.show { display: block; }
-    .debug-panel .err-line { color: #FCA5A5; }
-    .debug-panel .ok-line { color: #86EFAC; }
   </style>
 </head>
 <body>
@@ -454,7 +437,7 @@
 <div class="container">
   <div class="header-box">
     <h1>AI Purchase Order Extractor</h1>
-    <p class="subtitle">Complete Procurement System (Instant Live Output, High Coverage, Accurate Rates)</p>
+    <p class="subtitle">Complete Procurement System (Instant Extraction, Clean Engine, Accurate Rates)</p>
 
     <div class="api-key-container">
       <div class="api-key-box">
@@ -463,7 +446,7 @@
       </div>
       <div class="api-key-box">
         <label for="apiKeyInput2">🔑 Gemini API Key 2:</label>
-        <input type="password" id="apiKeyInput2" placeholder="Paste your 2nd Gemini API Key (AIzaSy...)">
+        <input type="password" id="apiKeyInput2" placeholder="Paste your 2nd Gemini API Key (Optional)">
       </div>
     </div>
 
@@ -514,18 +497,16 @@
 
     <div class="upload-zone">
       <input type="file" id="pdfInput" accept=".pdf,application/pdf" multiple>
-      <div style="font-size: 12px; color: #888; margin-top: 6px;">Upload all PDF documents (invoices/bills will be automatically skipped)</div>
+      <div style="font-size: 12px; color: #888; margin-top: 6px;">Upload PDF documents (invoices/bills will be automatically skipped)</div>
     </div>
 
     <div class="action-buttons">
       <button type="button" class="btn-main" id="processBtn">Extract Local Files</button>
       <button type="button" class="btn-stop" id="stopBtn">🛑 Stop Extraction</button>
       <button type="button" class="btn-secondary" id="clearHistoryBtn" title="Deletes backend memory of processed POs">🗑 Reset Processed PO History</button>
-      <button type="button" class="btn-secondary" id="toggleDebugBtn">🐞 Show Debug Log</button>
     </div>
 
-    <div class="status-text" id="statusText">Ready. Select files or fetch from Gmail...</div>
-    <div class="debug-panel" id="debugPanel"></div>
+    <div class="status-text" id="statusText">Ready. Provide Gemini API Key and select files or sync Gmail.</div>
   </div>
 
   <div class="metrics-grid" id="metricsGrid" style="display: none;">
@@ -624,36 +605,13 @@
   const btnYesterday = document.getElementById('btnYesterday');
   const btnLast7 = document.getElementById('btnLast7');
 
-  const debugPanel = document.getElementById('debugPanel');
-  const toggleDebugBtn = document.getElementById('toggleDebugBtn');
-  toggleDebugBtn.addEventListener('click', () => {
-    debugPanel.classList.toggle('show');
-    toggleDebugBtn.textContent = debugPanel.classList.contains('show') ? '🐞 Hide Debug Log' : '🐞 Show Debug Log';
-  });
-
-  function debugLog(message, isError = false) {
-    console[isError ? 'error' : 'log'](message);
-    const line = document.createElement('div');
-    line.className = isError ? 'err-line' : 'ok-line';
-    const time = new Date().toLocaleTimeString();
-    line.textContent = `[${time}] ${message}`;
-    debugPanel.appendChild(line);
-    debugPanel.scrollTop = debugPanel.scrollHeight;
-    if (isError) {
-      debugPanel.classList.add('show');
-      toggleDebugBtn.textContent = '🐞 Hide Debug Log';
-    }
-  }
-
   let isLiveProcessing = false;
   let abortRequested = false;
 
-  // Active production endpoints
-  const FAST_MODELS = [
+  // Gemini 3.0+ Production Endpoints
+  const VERSION_3_MODELS = [
     "gemini-3.0-flash",
-    "gemini-3.5-flash-lite",
-    "gemini-3.8-flash"
-    
+    "gemini-3.0-pro"
   ];
 
   const BACKEND_BASE = window.location.origin;
@@ -684,7 +642,7 @@
 
   stopBtn.addEventListener('click', () => {
     abortRequested = true;
-    statusText.textContent = "Stopping extraction... Finishing pending file.";
+    statusText.textContent = "Stopping extraction... Finishing current file.";
     stopBtn.disabled = true;
   });
 
@@ -760,12 +718,12 @@
   });
 
   clearHistoryBtn.addEventListener('click', async () => {
-    if (confirm("Reset backend PO memory? Skipped POs will be allowed to extract again.")) {
+    if (confirm("Reset backend PO history?")) {
       try {
         await fetch(`${BACKEND_BASE}/clear-history`, { method: "POST" });
-        alert("Processed PO history cleared!");
+        alert("Processed PO history cleared.");
       } catch (e) {
-        alert("Error connecting to backend: " + e.message);
+        alert("Server error: " + e.message);
       }
     }
   });
@@ -773,7 +731,7 @@
   async function countdownWait(seconds, reason = "Rate limit hit") {
     let remaining = Math.ceil(seconds);
     while (remaining > 0 && !abortRequested) {
-      statusText.textContent = `⏳ ${reason}. Waiting ${remaining}s before auto-retrying...`;
+      statusText.textContent = `⏳ ${reason}. Retrying in ${remaining}s...`;
       await sleep(1000);
       remaining--;
     }
@@ -995,7 +953,6 @@
   async function processPdfItems(fileList, keysList, alreadyProcessedSet = new Set(), forceReprocess = false) {
     let newlyExtracted = 0;
     let skippedCount = 0;
-    let duplicateSkipped = 0;
     let processedTotal = 0;
 
     isLiveProcessing = true;
@@ -1027,14 +984,12 @@
           skippedCount++;
           processedTotal++;
           statusText.textContent = `[${processedTotal}/${fileList.length}] Skipped invoice: ${fileName}`;
-          debugLog(`SKIPPED (filename filter): ${fileName}`);
           continue;
         }
 
         const chosenApiKey = getNextApiKey(keysList);
         const keyLabel = keysList.indexOf(chosenApiKey) + 1;
         statusText.textContent = `[${processedTotal + 1}/${fileList.length}] Analyzing [Key ${keyLabel}]: ${fileName}...`;
-        debugLog(`Sending to Gemini: ${fileName} (key ${keyLabel})`);
 
         try {
           const extractedData = await callGeminiAIWithRetry(chosenApiKey, keysList, fileObj.base64);
@@ -1042,23 +997,19 @@
           if (!extractedData || extractedData.isPurchaseOrder === false) {
             skippedCount++;
             processedTotal++;
-            statusText.textContent = `[${processedTotal}/${fileList.length}] Skipped Non-PO / No items: ${fileName}`;
-            debugLog(`Gemini identified as NOT a PO / no items: ${fileName}`, true);
+            statusText.textContent = `[${processedTotal}/${fileList.length}] Skipped Non-PO: ${fileName}`;
             continue;
           }
 
           const extractedPoNo = String(extractedData.poNo || "").trim().toUpperCase();
-          debugLog(`Extracted OK: ${fileName} -> PO#${extractedPoNo || "(none)"}, ${(extractedData.items||[]).length} item(s)`);
 
           if (extractedPoNo && tableExistingPOs.has(extractedPoNo)) {
-            duplicateSkipped++;
             processedTotal++;
             statusText.textContent = `[${processedTotal}/${fileList.length}] Already in table: ${extractedPoNo}`;
             continue;
           }
 
           if (!forceReprocess && extractedPoNo && alreadyProcessedSet.has(extractedPoNo)) {
-            duplicateSkipped++;
             processedTotal++;
             statusText.textContent = `[${processedTotal}/${fileList.length}] Previously saved: ${extractedPoNo}`;
             continue;
@@ -1132,14 +1083,12 @@
             }
           } else {
             skippedCount++;
-            debugLog(`Gemini returned isPurchaseOrder=true but 0 items for: ${fileName}`, true);
           }
           processedTotal++;
         } catch (docErr) {
           skippedCount++;
           processedTotal++;
           statusText.textContent = `Error in ${fileName}: ${docErr.message}`;
-          debugLog(`ERROR processing ${fileName}: ${docErr.message}`, true);
         }
       }
     }
@@ -1156,9 +1105,7 @@
     updateNumbersAndCount();
     statusText.textContent = abortRequested
       ? `Stopped by user! Extracted ${newlyExtracted} item(s).`
-      : `Done! Added ${newlyExtracted} item(s). Skipped ${skippedCount} non-PO / unreadable files.`;
-    debugLog(`RUN COMPLETE: extracted=${newlyExtracted}, skipped=${skippedCount}, duplicates=${duplicateSkipped}`);
-    return { newlyExtracted, skippedCount, duplicateSkipped };
+      : `Complete! Added ${newlyExtracted} item(s). Skipped ${skippedCount} non-PO files.`;
   }
 
   fetchGmailBtn.addEventListener('click', async () => {
@@ -1167,17 +1114,13 @@
     const passVal = gmailPassword.value.trim();
     const forceReprocess = forceReprocessCheck.checked;
 
-    if (keysList.length === 0) return alert("Please enter at least one Gemini API Key in Key 1 or Key 2 box.");
+    if (keysList.length === 0) return alert("Please enter at least one Gemini API Key.");
     if (!emailVal || !passVal) return alert("Please enter Gmail Address & App Password.");
 
     fetchGmailBtn.disabled = true;
     const filterBounds = getActiveFilterBounds();
 
-    const dateNotice = filterBounds.date_from
-      ? `${filterBounds.date_from} to ${filterBounds.date_to || filterBounds.date_from}`
-      : "All Dates";
-
-    statusText.textContent = `Connecting to Gmail (${keysList.length} Key Engine) [${dateNotice}]...`;
+    statusText.textContent = `Connecting to Gmail...`;
 
     try {
       const payload = {
@@ -1204,7 +1147,6 @@
       const data = await res.json();
       if (!data.files || data.files.length === 0) {
         statusText.textContent = `No matching PDF attachments found in Gmail.`;
-        debugLog(`Gmail fetch returned 0 files for filter ${JSON.stringify(payload)}`, true);
         return;
       }
 
@@ -1216,12 +1158,10 @@
         email_date: f.email_date
       }));
 
-      debugLog(`Gmail returned ${files.length} PDF attachment(s). Starting extraction...`);
       await processPdfItems(files, keysList, alreadyProcessed, forceReprocess);
     } catch (err) {
       alert("Error: " + err.message);
       statusText.textContent = "Error: " + err.message;
-      debugLog(`Gmail fetch failed: ${err.message}`, true);
     } finally {
       fetchGmailBtn.disabled = false;
     }
@@ -1248,7 +1188,6 @@
       for (let file of pdfInput.files) {
         const base64 = await fileToBase64(file);
         fileList.push({ name: file.name, filename: file.name, base64: base64, email_date: "" });
-        debugLog(`Queued local file: ${file.name} (${(file.size/1024).toFixed(0)} KB)`);
       }
 
       await processPdfItems(fileList, keysList, alreadyProcessed, true);
@@ -1256,7 +1195,6 @@
     } catch (err) {
       alert("Error: " + err.message);
       statusText.textContent = "Error: " + err.message;
-      debugLog(`Local processing failed: ${err.message}`, true);
     } finally {
       processBtn.disabled = false;
     }
@@ -1275,74 +1213,60 @@
     let candidateKeys = [initialKey, ...allKeysList.filter(k => k !== initialKey)];
     let lastError = null;
 
-    const systemInstruction = `You are an expert ERP Purchase Order Data Extractor.
-Extract procurement items from the document.
+    const promptText = `You are an expert ERP Purchase Order Data Extractor.
+Extract procurement line items from this document.
 
 RULES:
-1. ONLY reject (set isPurchaseOrder: false) if the file is explicitly an invoice, delivery challan, or salary receipt.
+1. ONLY reject (isPurchaseOrder: false) if this document is strictly an invoice, payment receipt, or transport challan.
 2. If it is a Purchase Order, Indent, Work Order, LOI, or Supply Contract, ALWAYS set isPurchaseOrder: true.
-3. Classic Automation is the vendor/seller. Extract the CLIENT / BUYER company name and address.
-4. Always extract the items table: part number, description, quantity, unit rate, and total amount.
-5. You MUST return ONLY a clean, valid JSON object matching the requested schema.`;
-
-    const jsonSchema = {
-      type: "OBJECT",
-      properties: {
-        isPurchaseOrder: { type: "BOOLEAN" },
-        buyerCompanyName: { type: "STRING" },
-        buyerBillingAddress: { type: "STRING" },
-        poNumber: { type: "STRING" },
-        poDate: { type: "STRING" },
-        items: {
-          type: "ARRAY",
-          items: {
-            type: "OBJECT",
-            properties: {
-              partNo: { type: "STRING" },
-              desc: { type: "STRING" },
-              qty: { type: "STRING" },
-              unit: { type: "STRING" },
-              rate: { type: "STRING" },
-              discountPercent: { type: "STRING" },
-              discountAmount: { type: "STRING" },
-              amount: { type: "STRING" }
-            }
-          }
-        }
-      },
-      required: ["isPurchaseOrder"]
-    };
+3. Classic Automation is the vendor/supplier. Extract the BUYER / CLIENT company name and address.
+4. Extract every single item into items array.
+5. Return strictly a raw JSON object with NO markdown ticks:
+{
+  "isPurchaseOrder": true,
+  "buyerCompanyName": "...",
+  "buyerBillingAddress": "...",
+  "poNumber": "...",
+  "poDate": "...",
+  "items": [
+    {
+      "partNo": "...",
+      "desc": "...",
+      "qty": "...",
+      "unit": "NOS",
+      "rate": "...",
+      "discountPercent": "0",
+      "discountAmount": "0.00",
+      "amount": "..."
+    }
+  ]
+}`;
 
     for (let key of candidateKeys) {
-      const cleanKey = key.trim();
+      const cleanKey = (key || "").trim();
+      if (!cleanKey) continue;
 
-      for (let rawModel of FAST_MODELS) {
-        if (abortRequested) throw new Error("Operation cancelled by user.");
+      for (let modelName of VERSION_3_MODELS) {
+        if (abortRequested) throw new Error("Cancelled by user.");
 
-        const cleanModel = rawModel.replace(/^models\//, "");
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent`;
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(cleanKey)}`;
 
         try {
           const response = await fetch(url, {
             method: "POST",
             headers: {
-              "Content-Type": "application/json",
-              "x-goog-api-key": cleanKey
+              "Content-Type": "application/json"
             },
             body: JSON.stringify({
-              system_instruction: {
-                parts: [{ text: systemInstruction }]
-              },
               contents: [{
                 role: "user",
                 parts: [
-                  { text: "Extract all items from this purchase document in strict JSON." },
+                  { text: promptText },
                   { inline_data: { mime_type: "application/pdf", data: base64Pdf } }
                 ]
               }],
               generationConfig: {
                 response_mime_type: "application/json",
-                response_schema: jsonSchema,
                 temperature: 0.1
               }
             })
@@ -1350,11 +1274,8 @@ RULES:
 
           if (response.ok) {
             const resJson = await response.json();
-
             if (!resJson.candidates || resJson.candidates.length === 0) {
-              const blockReason = resJson.promptFeedback?.blockReason || "unknown";
-              debugLog(`Gemini returned NO candidates. blockReason=${blockReason}`, true);
-              lastError = `No candidates returned (blockReason: ${blockReason})`;
+              lastError = "No response candidates returned.";
               continue;
             }
 
@@ -1367,16 +1288,8 @@ RULES:
             } catch (e) {
               const match = candidateText.match(/\{[\s\S]*\}/);
               if (match) {
-                try {
-                  data = JSON.parse(match[0]);
-                } catch (e2) {
-                  debugLog(`JSON parse failed. Raw: ${candidateText.slice(0, 300)}`, true);
-                  lastError = "Model returned malformed JSON.";
-                  continue;
-                }
+                data = JSON.parse(match[0]);
               } else {
-                debugLog(`Model response was not JSON: ${candidateText.slice(0, 300)}`, true);
-                lastError = "Model returned non-JSON text.";
                 continue;
               }
             }
@@ -1440,26 +1353,29 @@ RULES:
 
           const errData = await response.json().catch(() => ({}));
           const errMsg = errData.error?.message || `HTTP ${response.status}`;
-          debugLog(`Gemini API error [${cleanModel}, key ${candidateKeys.indexOf(key)+1}]: HTTP ${response.status} - ${errMsg}`, true);
+
+          if (response.status === 401) {
+            lastError = "Invalid API key provided. Please re-check API key.";
+            break;
+          }
 
           if (response.status === 429) {
             if (candidateKeys.length > 1 && key === candidateKeys[0]) {
-              statusText.textContent = `⚡ Key 1 limit reached. Switching to Key 2...`;
+              statusText.textContent = `Key 1 rate limit reached. Switching to Key 2...`;
               break;
             } else {
-              await countdownWait(5, "Rate limit hit across keys");
+              await countdownWait(5, "Model busy");
               continue;
             }
           }
 
           lastError = errMsg;
         } catch (netErr) {
-          debugLog(`Network error calling Gemini [${cleanModel}]: ${netErr.message}`, true);
           lastError = netErr.message;
         }
       }
     }
-    throw new Error(lastError || "Extraction failed on all provided API keys.");
+    throw new Error(lastError || "Could not complete extraction on available keys.");
   }
 
   function addRowToTable(data = {}) {
@@ -1563,7 +1479,7 @@ RULES:
       rows.push(rowData);
     });
 
-    if (rows.length === 0) return alert("No matching data to download.");
+    if (rows.length === 0) return alert("No records available to export.");
     const ws = XLSX.utils.json_to_sheet(rows);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "PO Items");
