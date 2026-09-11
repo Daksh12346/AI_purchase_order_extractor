@@ -17,9 +17,8 @@ from pydantic import BaseModel
 import uvicorn
 import requests
 
-app = FastAPI(title="AI Purchase Order Extractor System")
+app = FastAPI(title="AI Purchase Order Extractor System (Gemini Enabled)")
 
-# CORS Setup
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -66,12 +65,6 @@ class MarkProcessedRequest(BaseModel):
     po_numbers: List[str]
 
 
-class ExtractPdfRequest(BaseModel):
-    api_key: str
-    content_type: str  # "text" or "image"
-    content: str
-
-
 def sanitize_header_str(val: Any) -> str:
     if not val:
         return ""
@@ -95,7 +88,6 @@ def decode_mime_words(s: str) -> str:
             else:
                 output.append(str(fragment))
         res = "".join(output).strip()
-        # Clean control characters
         return re.sub(r"[\r\n\t]+", " ", res)
     except Exception:
         return str(s)
@@ -143,7 +135,6 @@ def sync_fetch_po_pdfs(req: GmailFetchRequest) -> dict:
         status, message_numbers = mail.uid("search", None, f'X-GM-RAW "{full_raw_query}"')
 
         if status != "OK" or not message_numbers or not message_numbers[0]:
-            # Fallback search without custom keyword if query failed
             status, message_numbers = mail.uid("search", None, 'X-GM-RAW "has:attachment filename:pdf"')
 
         if status != "OK" or not message_numbers or not message_numbers[0]:
@@ -152,7 +143,6 @@ def sync_fetch_po_pdfs(req: GmailFetchRequest) -> dict:
         email_uids = message_numbers[0].split()
         email_uids.reverse()
 
-        # Limit batch size to prevent server timeout
         email_uids = email_uids[:50]
 
         extracted_files = []
@@ -194,18 +184,13 @@ def sync_fetch_po_pdfs(req: GmailFetchRequest) -> dict:
                     else:
                         filename = f"Attachment_{len(extracted_files)+1}.pdf"
 
-                    # Verify actual PDF extension
                     if not filename.lower().endswith(".pdf"):
                         continue
 
                     payload = part.get_payload(decode=True)
-                    if not payload or len(payload) == 0:
+                    if not payload or len(payload) == 0 or len(payload) > max_bytes:
                         continue
 
-                    if len(payload) > max_bytes:
-                        continue
-
-                    # Safe base64 conversion
                     b64_str = base64.b64encode(payload).decode("utf-8")
                     extracted_files.append({
                         "filename": filename,
@@ -233,57 +218,6 @@ def sync_fetch_po_pdfs(req: GmailFetchRequest) -> dict:
                 mail.logout()
             except Exception:
                 pass
-
-
-@app.post("/extract-openai")
-def extract_openai_backend(req: ExtractPdfRequest):
-    """Secure, server-side OpenAI call that prevents browser CORS and timeout errors."""
-    clean_key = req.api_key.strip().replace('"', '').replace("'", "")
-    if not clean_key:
-        raise HTTPException(status_code=400, detail="OpenAI API Key is required.")
-
-    system_prompt = (
-        "You are an ERP Purchase Order Data Extractor. Extract procurement records into valid JSON.\n"
-        "RULES:\n"
-        "1. Identify documents that are Purchase Orders, Indents, Supply Contracts, or Work Orders.\n"
-        "2. Mark isPurchaseOrder: false ONLY if strictly an invoice, bill, or transport receipt.\n"
-        "3. Extract client/buyer organization name, address, PO number, PO date, and line items.\n"
-        "4. Return strict JSON format with keys: isPurchaseOrder, buyerCompanyName, buyerBillingAddress, poNumber, poDate, items."
-    )
-
-    user_contents: List[Dict[str, Any]] = []
-    if req.content_type == "image":
-        user_contents.append({"type": "text", "text": "Extract all PO line items from this scanned document image in JSON format."})
-        user_contents.append({"type": "image_url", "image_url": {"url": req.content}})
-    else:
-        user_contents.append({"type": "text", "text": f"Extract all PO line items from this document text in JSON format:\n\n{req.content}"})
-
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {clean_key}"
-    }
-
-    body = {
-        "model": "gpt-4o-mini",
-        "response_format": {"type": "json_object"},
-        "temperature": 0.1,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_contents}
-        ]
-    }
-
-    try:
-        resp = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=body, timeout=60)
-        if resp.status_code != 200:
-            err_data = resp.json().get("error", {}) if resp.text else {}
-            msg = err_data.get("message", f"OpenAI HTTP {resp.status_code}")
-            raise HTTPException(status_code=resp.status_code, detail=msg)
-        return resp.json()
-    except requests.exceptions.Timeout:
-        raise HTTPException(status_code=504, detail="OpenAI request timed out. Please try again.")
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=502, detail=f"Failed to communicate with OpenAI: {str(e)}")
 
 
 @app.get("/", response_class=HTMLResponse)
