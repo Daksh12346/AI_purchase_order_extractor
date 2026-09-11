@@ -649,6 +649,8 @@
     stopBtn.disabled = true;
   });
 
+  const sleep = ms => new Promise(res => setTimeout(res, ms));
+
   function formatDateToISO(d) {
     const year = d.getFullYear();
     const month = String(d.getMonth() + 1).padStart(2, '0');
@@ -725,13 +727,11 @@
   function detectAndValidatePartNumber(aiPartNo) {
     if (!aiPartNo || typeof aiPartNo !== 'string') return "";
     
-    // Extra spaces aur surrounding quotes/symbols hatayein
     let clean = aiPartNo.trim().replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, '');
     if (!clean || clean.length < 3 || clean.length > 35) return "";
 
     const upper = clean.toUpperCase();
 
-    // 1. Blacklist generic strings
     const blacklist = [
       'NA', 'N/A', 'NIL', 'NONE', 'NULL', 'NOT AVAILABLE', 'NO', 'ITEM', 'PART', 'CODE', 
       'MATERIAL', 'SR', 'SL', 'SNO', 'LINE', 'POS', 'DESC', 'DESCRIPTION', 'TYPE', 
@@ -742,53 +742,42 @@
     ];
     if (blacklist.includes(upper)) return "";
 
-    // 2. Reject pure technical ratings/specs (e.g. 10A, 415V, 2.5KW, 100MM, 4POLE)
     if (/^(\d+P|\d+A|\d+V|\d+KW|\d+HP|\d+K|\d+-WAY|\d+MM|\d+X\d+|\d+SQMM|\d+VAC|\d+VDC|\d+AMP|\d+POLE)$/i.test(upper)) {
       return "";
     }
 
-    // 3. Reject HSN / SAC codes (usually 4, 6 or 8 digits pure numbers)
     if (/^\d{4}$|^\d{6}$|^\d{8}$/.test(upper)) {
       return "";
     }
 
-    // 4. Reject simple small numeric counters (like line numbers: 1, 10, 20, 100)
     if (/^\d{1,3}$/.test(upper)) {
       return "";
     }
 
-    // 5. Reject plain single english words (e.g. "CONTACTOR", "RELAY", "CABLE")
     if (/^[A-Za-z]+$/.test(clean) && clean.length > 4) {
       return "";
     }
 
-    // 6. Confirmed Part Code patterns:
-    // Pattern A: Alphanumeric combination (e.g. LC1D25M7, 3RT2026, 3VA1116)
     const hasLetter = /[A-Za-z]/.test(clean);
     const hasDigit = /\d/.test(clean);
     if (hasLetter && hasDigit) {
       return clean;
     }
 
-    // Pattern B: Delimited codes with hyphens, slashes, or dots (e.g. XCK-P121, 6ES7-214)
     if (/^[A-Za-z0-9]+(?:[-/.][A-Za-z0-9]+)+$/.test(clean)) {
       return clean;
     }
 
-    // Pattern C: Specific manufacturer part codes (e.g. 10-12 digit SAP material codes like 1000234567)
     if (/^\d{9,15}$/.test(clean)) {
       return clean;
     }
 
-    // Agar confirm na ho toh blank chhod do
     return "";
   }
 
   function sanitizeBuyerAddress(rawAddress) {
     if (!rawAddress || typeof rawAddress !== 'string') return "";
     let clean = rawAddress.trim().replace(/^[:\-\s]+|[:\-\s]+$/g, '');
-    
-    // Agar address me vendor details hon toh discard karo
     const lower = clean.toLowerCase();
     if (lower.includes("classic automation")) {
       return "";
@@ -980,6 +969,7 @@
     }
   }
 
+  // Auto-retrying Gemini API Call with 429 Quota Backoff
   async function callGemini(apiKey, parsedContent) {
     const cleanKey = apiKey.trim().replace(/^["']|["']$/g, '');
 
@@ -1057,29 +1047,53 @@ Return STRICTLY raw JSON:
     let resJson = null;
 
     for (const url of candidateEndpoints) {
-      try {
-        const response = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload)
-        });
+      let retriesLeft = 4;
+      let delayMs = 4500;
 
-        if (response.ok) {
-          resJson = await response.json();
-          break;
-        } else {
+      while (retriesLeft > 0) {
+        if (abortRequested) throw new Error("Processing stopped by user.");
+
+        try {
+          const response = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+          });
+
+          if (response.ok) {
+            resJson = await response.json();
+            break;
+          }
+
           const errData = await response.json().catch(() => ({}));
-          lastError = new Error(errData.error?.message || `HTTP ${response.status}`);
-          if (response.status !== 404) {
+          const errMsg = errData.error?.message || `HTTP ${response.status}`;
+
+          // Rate limit / Quota hit (429) -> Auto wait & retry
+          if (response.status === 429 || errMsg.toLowerCase().includes("quota") || errMsg.toLowerCase().includes("rate")) {
+            retriesLeft--;
+            statusText.textContent = `⏳ Gemini RPM rate limit hit. Pausing ${Math.round(delayMs / 1000)}s before auto-retrying...`;
+            await sleep(delayMs);
+            delayMs += 2500; // exponential backoff
+            continue;
+          }
+
+          lastError = new Error(errMsg);
+          if (response.status === 404) {
+            break; // Try next endpoint
+          } else {
             throw lastError;
           }
-        }
-      } catch (err) {
-        lastError = err;
-        if (!err.message.includes("404") && !err.message.includes("not found")) {
-          throw err;
+        } catch (err) {
+          lastError = err;
+          if (err.message.includes("stopped by user")) throw err;
+          if (!err.message.includes("404") && !err.message.includes("not found")) {
+            throw err;
+          }
+          break;
         }
       }
+
+      if (resJson) break;
     }
 
     if (!resJson) {
@@ -1142,7 +1156,6 @@ Return STRICTLY raw JSON:
         if (r === 0 && a > 0) r = a / q;
         if (a === 0 && r > 0) a = (q * r) - da;
 
-        // 100% STRICT VALIDATION CALL FOR PART NO
         const validatedPartNo = detectAndValidatePartNumber(it.partNo);
 
         return {
@@ -1180,132 +1193,125 @@ Return STRICTLY raw JSON:
       if (p && p.trim()) tableExistingPOs.add(p.trim().toUpperCase());
     });
 
-    const CONCURRENCY_LIMIT = 2;
-    let fileCursor = 0;
+    // Sequential 1-by-1 processing for Gemini Free Tier to prevent 429
+    for (let i = 0; i < fileList.length; i++) {
+      if (abortRequested) break;
 
-    async function worker() {
-      while (fileCursor < fileList.length) {
-        if (abortRequested) break;
+      const fileObj = fileList[i];
+      const fileName = (fileObj && (fileObj.name || fileObj.filename)) ? (fileObj.name || fileObj.filename) : `Document_${i + 1}.pdf`;
 
-        const currentIndex = fileCursor++;
-        const fileObj = fileList[currentIndex];
-        const fileName = (fileObj && (fileObj.name || fileObj.filename)) ? (fileObj.name || fileObj.filename) : `Document_${currentIndex + 1}.pdf`;
+      if (isExplicitlyNonPoFile(fileName)) {
+        skippedCount++;
+        processedTotal++;
+        statusText.textContent = `[${processedTotal}/${fileList.length}] Filtered non-PO file: ${fileName}`;
+        continue;
+      }
 
-        if (isExplicitlyNonPoFile(fileName)) {
+      statusText.textContent = `[${processedTotal + 1}/${fileList.length}] Checking & Extracting: ${fileName}...`;
+
+      try {
+        const parsedContent = await parsePdfContent(fileObj.base64);
+
+        if (!parsedContent.content) {
           skippedCount++;
           processedTotal++;
-          statusText.textContent = `[${processedTotal}/${fileList.length}] Filtered non-PO file: ${fileName}`;
+          statusText.textContent = `[${processedTotal}/${fileList.length}] Blank / Unreadable PDF: ${fileName}`;
           continue;
         }
 
-        statusText.textContent = `[${processedTotal + 1}/${fileList.length}] Checking & Extracting: ${fileName}...`;
+        const extractedData = await callGemini(apiKey, parsedContent);
+        const items = Array.isArray(extractedData?.items) ? extractedData.items : [];
 
-        try {
-          const parsedContent = await parsePdfContent(fileObj.base64);
+        if (!extractedData.isStrictConfirmedPO || items.length === 0) {
+          skippedCount++;
+          processedTotal++;
+          statusText.textContent = `[${processedTotal}/${fileList.length}] Skipped (Not a confirmed PO / Invoice): ${fileName}`;
+          continue;
+        }
 
-          if (!parsedContent.content) {
-            skippedCount++;
-            processedTotal++;
-            statusText.textContent = `[${processedTotal}/${fileList.length}] Blank / Unreadable PDF: ${fileName}`;
-            continue;
-          }
+        const extractedPoNo = String(extractedData.poNo || "").trim().toUpperCase();
 
-          const extractedData = await callGemini(apiKey, parsedContent);
-          const items = Array.isArray(extractedData?.items) ? extractedData.items : [];
+        if (extractedPoNo && tableExistingPOs.has(extractedPoNo) && !forceReprocess) {
+          processedTotal++;
+          statusText.textContent = `[${processedTotal}/${fileList.length}] Already in table: ${extractedPoNo}`;
+          continue;
+        }
 
-          if (!extractedData.isStrictConfirmedPO || items.length === 0) {
-            skippedCount++;
-            processedTotal++;
-            statusText.textContent = `[${processedTotal}/${fileList.length}] Skipped (Not a confirmed PO / Invoice): ${fileName}`;
-            continue;
-          }
+        if (!forceReprocess && extractedPoNo && alreadyProcessedSet.has(extractedPoNo)) {
+          processedTotal++;
+          statusText.textContent = `[${processedTotal}/${fileList.length}] Previously processed: ${extractedPoNo}`;
+          continue;
+        }
 
-          const extractedPoNo = String(extractedData.poNo || "").trim().toUpperCase();
+        let resolvedCompany = String(extractedData.companyName || "").trim();
+        let resolvedAddress = extractedData.companyAddress || "";
 
-          if (extractedPoNo && tableExistingPOs.has(extractedPoNo) && !forceReprocess) {
-            processedTotal++;
-            statusText.textContent = `[${processedTotal}/${fileList.length}] Already in table: ${extractedPoNo}`;
-            continue;
-          }
+        if (resolvedCompany.toLowerCase().includes("classic automation") || resolvedCompany.length < 2) {
+          resolvedCompany = "Buyer Organization";
+        }
 
-          if (!forceReprocess && extractedPoNo && alreadyProcessedSet.has(extractedPoNo)) {
-            processedTotal++;
-            statusText.textContent = `[${processedTotal}/${fileList.length}] Previously processed: ${extractedPoNo}`;
-            continue;
-          }
+        if (extractedPoNo) {
+          tableExistingPOs.add(extractedPoNo);
+        }
 
-          let resolvedCompany = String(extractedData.companyName || "").trim();
-          let resolvedAddress = extractedData.companyAddress || "";
+        const formattedGmailDate = formatGmailDateToDDMMYY(fileObj.email_date);
+        const rawDocPoDate = extractedData.poDate || "";
 
-          if (resolvedCompany.toLowerCase().includes("classic automation") || resolvedCompany.length < 2) {
-            resolvedCompany = "Buyer Organization";
-          }
+        items.forEach(item => {
+          const currentTotal = tableBody.querySelectorAll('tr').length + 1;
+          newlyExtracted++;
 
-          if (extractedPoNo) {
-            tableExistingPOs.add(extractedPoNo);
-          }
-
-          const formattedGmailDate = formatGmailDateToDDMMYY(fileObj.email_date);
-          const rawDocPoDate = extractedData.poDate || "";
-
-          items.forEach(item => {
-            const currentTotal = tableBody.querySelectorAll('tr').length + 1;
-            newlyExtracted++;
-
-            const newRow = addRowToTable({
-              sNo: currentTotal,
-              company: resolvedCompany,
-              address: resolvedAddress,
-              poNo: extractedData.poNo,
-              poDate: rawDocPoDate,
-              gmailDate: formattedGmailDate,
-              partNo: item.partNo, // 100% strict validated partNo (or empty string)
-              desc: item.desc || "",
-              qty: item.qty || "1",
-              unit: item.unit || "NOS",
-              rate: item.rate || "0.00",
-              discountPercent: item.discountPercent || "0",
-              discountAmount: item.discountAmount || "0.00",
-              amount: item.amount || "0.00",
-              source: fileName
-            });
-
-            newRow.classList.add('newly-added');
-            setTimeout(() => newRow.classList.remove('newly-added'), 2000);
+          const newRow = addRowToTable({
+            sNo: currentTotal,
+            company: resolvedCompany,
+            address: resolvedAddress,
+            poNo: extractedData.poNo,
+            poDate: rawDocPoDate,
+            gmailDate: formattedGmailDate,
+            partNo: item.partNo,
+            desc: item.desc || "",
+            qty: item.qty || "1",
+            unit: item.unit || "NOS",
+            rate: item.rate || "0.00",
+            discountPercent: item.discountPercent || "0",
+            discountAmount: item.discountAmount || "0.00",
+            amount: item.amount || "0.00",
+            source: fileName
           });
 
-          updateNumbersAndCount();
+          newRow.classList.add('newly-added');
+          setTimeout(() => newRow.classList.remove('newly-added'), 2000);
+        });
 
-          const tableScrollContainer = document.querySelector('.table-scroll');
-          if (tableScrollContainer) {
-            tableScrollContainer.scrollTop = tableScrollContainer.scrollHeight;
-          }
+        updateNumbersAndCount();
 
-          if (extractedPoNo && !forceReprocess) {
-            fetch(`${BACKEND_BASE}/mark-processed`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ po_numbers: [extractedPoNo] })
-            }).catch(() => {});
-          }
-
-          processedTotal++;
-        } catch (docErr) {
-          failedCount++;
-          processedTotal++;
-          errorBanner.style.display = 'block';
-          errorBanner.innerHTML = `<strong>Last API Error:</strong> ${docErr.message}<br><small>Ensure valid Gemini API Key from Google AI Studio.</small>`;
-          statusText.textContent = `❌ Error on ${fileName}: ${docErr.message}`;
+        const tableScrollContainer = document.querySelector('.table-scroll');
+        if (tableScrollContainer) {
+          tableScrollContainer.scrollTop = tableScrollContainer.scrollHeight;
         }
+
+        if (extractedPoNo && !forceReprocess) {
+          fetch(`${BACKEND_BASE}/mark-processed`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ po_numbers: [extractedPoNo] })
+          }).catch(() => {});
+        }
+
+        processedTotal++;
+
+        // Gentle 3-second delay between requests to remain strictly under the 20 RPM Free-tier limit
+        if (i < fileList.length - 1) {
+          await sleep(3500);
+        }
+      } catch (docErr) {
+        failedCount++;
+        processedTotal++;
+        errorBanner.style.display = 'block';
+        errorBanner.innerHTML = `<strong>Last API Error:</strong> ${docErr.message}<br><small>Ensure valid Gemini API Key from Google AI Studio.</small>`;
+        statusText.textContent = `❌ Error on ${fileName}: ${docErr.message}`;
       }
     }
-
-    const workers = [];
-    const activeConcurrency = Math.min(CONCURRENCY_LIMIT, fileList.length);
-    for (let w = 0; w < activeConcurrency; w++) {
-      workers.push(worker());
-    }
-    await Promise.all(workers);
 
     isLiveProcessing = false;
     stopBtn.style.display = 'none';
