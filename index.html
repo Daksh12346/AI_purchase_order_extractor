@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AI Purchase Order Extractor (Gemini 3.6 Flash)</title>
+  <title>AI Purchase Order Extractor</title>
   <!-- XLSX Library -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <!-- PDF.js Engine -->
@@ -454,7 +454,7 @@
 <div class="container">
   <div class="header-box">
     <h1>AI Purchase Order Extractor</h1>
-    <p class="subtitle">Procurement Automation Powered by Google Gemini 3.6 Flash</p>
+    <p class="subtitle">Strict PO Verification, Accurate Buyer Address & 100% Confirmed Part Numbers</p>
 
     <div class="api-key-container">
       <div class="api-key-box">
@@ -510,7 +510,7 @@
 
     <div class="upload-zone">
       <input type="file" id="pdfInput" accept=".pdf,application/pdf" multiple>
-      <div style="font-size: 12px; color: #888; margin-top: 6px;">Upload all PDF documents (Invoices without orders will be safely skipped)</div>
+      <div style="font-size: 12px; color: #888; margin-top: 6px;">Upload PDF documents (Only strictly confirmed POs will be extracted)</div>
     </div>
 
     <div class="action-buttons">
@@ -550,7 +550,7 @@
           <tr id="headerRow">
             <th data-key="sNo" style="width: 55px;">S.No</th>
             <th data-key="company" style="min-width: 210px;">Company Name</th>
-            <th data-key="address" style="min-width: 220px;">Company Address</th>
+            <th data-key="address" style="min-width: 240px;">Company Address</th>
             <th data-key="poNo" style="min-width: 150px;">PO / Order No</th>
             <th data-key="poDate" style="min-width: 120px;">PO Date (Doc)</th>
             <th data-key="gmailDate" style="min-width: 110px;">Gmail Date (DD/MM/YY)</th>
@@ -717,64 +717,83 @@
   function isExplicitlyNonPoFile(filename) {
     if (!filename || typeof filename !== 'string') return false;
     const lower = filename.toLowerCase();
-    const blockedTerms = ['tax invoice', 'retail invoice', 'delivery challan', 'salary slip', 'receipt_'];
+    const blockedTerms = ['tax invoice', 'retail invoice', 'delivery challan', 'salary slip', 'receipt_', 'bill of supply', 'statement'];
     return blockedTerms.some(t => lower.includes(t));
   }
 
-  function detectAndValidatePartNumber(aiPartNo, descText) {
-    function cleanCandidate(c) {
-      if (!c) return "";
-      return c.trim().replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, '');
+  // 100% STRICT PART NUMBER VALIDATOR (NO GUESSWORK)
+  function detectAndValidatePartNumber(aiPartNo) {
+    if (!aiPartNo || typeof aiPartNo !== 'string') return "";
+    
+    // Extra spaces aur surrounding quotes/symbols hatayein
+    let clean = aiPartNo.trim().replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, '');
+    if (!clean || clean.length < 3 || clean.length > 35) return "";
+
+    const upper = clean.toUpperCase();
+
+    // 1. Blacklist generic strings
+    const blacklist = [
+      'NA', 'N/A', 'NIL', 'NONE', 'NULL', 'NOT AVAILABLE', 'NO', 'ITEM', 'PART', 'CODE', 
+      'MATERIAL', 'SR', 'SL', 'SNO', 'LINE', 'POS', 'DESC', 'DESCRIPTION', 'TYPE', 
+      'MAKE', 'BRAND', 'MODEL', 'SIZE', 'RATING', 'ART', 'ARTICLE', 'SPEC', 'SPECIFICATION',
+      'SCHNEIDER', 'SIEMENS', 'L&T', 'ABB', 'HAVELLS', 'LEGRAND', 'OMRON', 'PHOENIX', 
+      'WAGO', 'EATON', 'DELTA', 'MITSUBISHI', 'DANFOSS', 'POLYCAB', 'FINOLEX', 'RITTAL',
+      'NOS', 'SET', 'PCS', 'EA', 'MTR', 'KG', 'LOT', 'PKT', 'PAIR', 'METRE', 'COIL', 'ROLL', 'BAG', 'BOX', 'PACK'
+    ];
+    if (blacklist.includes(upper)) return "";
+
+    // 2. Reject pure technical ratings/specs (e.g. 10A, 415V, 2.5KW, 100MM, 4POLE)
+    if (/^(\d+P|\d+A|\d+V|\d+KW|\d+HP|\d+K|\d+-WAY|\d+MM|\d+X\d+|\d+SQMM|\d+VAC|\d+VDC|\d+AMP|\d+POLE)$/i.test(upper)) {
+      return "";
     }
 
-    function isBlacklisted(str) {
-      if (!str) return true;
-      const s = str.toUpperCase().trim();
-      if (/^(NA|N\/A|NIL|NONE|NULL|-|_|\.|\/)$/i.test(s)) return true;
-      if (/^(SCHNEIDER|SIEMENS|L&T|ABB|HAVELLS|LEGRAND|OMRON|PHOENIX|WAGO|EATON|DELTA|MITSUBISHI|DANFOSS)$/i.test(s)) return true;
-      if (/^(NOS|SET|PCS|EA|MTR|KG|LOT|NO|PKT|PAIR|METRE|COIL|ROLL|BAG|BOX|PACK)$/i.test(s)) return true;
-      if (/^(ITEM|ITM|MAT|MATERIAL|IND|CODE|SR|SL|SNO|LINE|POS|DESCR|TYPE|MAKE|BRAND|MODEL|SIZE|RATING|ART|ARTICLE)\b/i.test(s)) return true;
-      if (/^ITM[0-9_-]+/i.test(s)) return true;
-      if (/^MAT[0-9_-]+/i.test(s)) return true;
-      if (/^11[0-9]{5,}/.test(s)) return true;
-      if (/^(\d+P|\d+A|\d+V|\d+KW|\d+HP|\d+K|\d+-WAY|\d+MM|\d+X\d+|\d+SQMM|\d+VAC|\d+VDC|\d+AMP|\d+POLE)$/i.test(s)) return true;
-      if (/^\d{6,8}$/.test(s)) return true;
-      if (/^\d{1,4}$/.test(s)) return true;
-      return false;
+    // 3. Reject HSN / SAC codes (usually 4, 6 or 8 digits pure numbers)
+    if (/^\d{4}$|^\d{6}$|^\d{8}$/.test(upper)) {
+      return "";
     }
 
-    function isAuthenticCode(code) {
-      if (!code || isBlacklisted(code)) return false;
-      const c = code.trim();
-      if (c.length < 3 || c.length > 30) return false;
-      if (/^[A-Za-z0-9]+(?:[-/.][A-Za-z0-9]+)+$/.test(c)) return true;
-      if (/^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9]{4,25}$/.test(c)) return true;
-      if (/^[A-Z]{2,5}[0-9]{2,6}$/i.test(c)) return true;
-      return false;
+    // 4. Reject simple small numeric counters (like line numbers: 1, 10, 20, 100)
+    if (/^\d{1,3}$/.test(upper)) {
+      return "";
     }
 
-    let colCandidate = cleanCandidate(aiPartNo);
-    if (colCandidate && isAuthenticCode(colCandidate)) return colCandidate;
-
-    if (descText && typeof descText === 'string') {
-      const tokens = descText.split(/[\s,;()\[\]{}|]+/);
-      for (let t of tokens) {
-        let cleanToken = cleanCandidate(t);
-        if (isAuthenticCode(cleanToken)) return cleanToken;
-      }
+    // 5. Reject plain single english words (e.g. "CONTACTOR", "RELAY", "CABLE")
+    if (/^[A-Za-z]+$/.test(clean) && clean.length > 4) {
+      return "";
     }
-    return colCandidate || "";
+
+    // 6. Confirmed Part Code patterns:
+    // Pattern A: Alphanumeric combination (e.g. LC1D25M7, 3RT2026, 3VA1116)
+    const hasLetter = /[A-Za-z]/.test(clean);
+    const hasDigit = /\d/.test(clean);
+    if (hasLetter && hasDigit) {
+      return clean;
+    }
+
+    // Pattern B: Delimited codes with hyphens, slashes, or dots (e.g. XCK-P121, 6ES7-214)
+    if (/^[A-Za-z0-9]+(?:[-/.][A-Za-z0-9]+)+$/.test(clean)) {
+      return clean;
+    }
+
+    // Pattern C: Specific manufacturer part codes (e.g. 10-12 digit SAP material codes like 1000234567)
+    if (/^\d{9,15}$/.test(clean)) {
+      return clean;
+    }
+
+    // Agar confirm na ho toh blank chhod do
+    return "";
   }
 
   function sanitizeBuyerAddress(rawAddress) {
-    if (!rawAddress || typeof rawAddress !== 'string') return "Address on Document";
-    const lower = rawAddress.toLowerCase();
-    if (lower.includes("classic automation") ||
-        (lower.includes("rudrapur") && lower.includes("sidcul") && lower.includes("khasra")) ||
-        lower.includes("ward no 11") || lower.includes("kashipur bypass")) {
-      return "Registered Plant Address";
+    if (!rawAddress || typeof rawAddress !== 'string') return "";
+    let clean = rawAddress.trim().replace(/^[:\-\s]+|[:\-\s]+$/g, '');
+    
+    // Agar address me vendor details hon toh discard karo
+    const lower = clean.toLowerCase();
+    if (lower.includes("classic automation")) {
+      return "";
     }
-    return rawAddress.trim() || "Registered Plant Address";
+    return clean;
   }
 
   function parseFlexibleDate(dateStr) {
@@ -948,13 +967,13 @@
       }
 
       const firstPage = await pdf.getPage(1);
-      const viewport = firstPage.getViewport({ scale: 1.2 });
+      const viewport = firstPage.getViewport({ scale: 1.5 });
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d');
       canvas.width = viewport.width;
       canvas.height = viewport.height;
       await firstPage.render({ canvasContext: ctx, viewport: viewport }).promise;
-      return { type: "image", content: canvas.toDataURL('image/jpeg', 0.75) };
+      return { type: "image", content: canvas.toDataURL('image/jpeg', 0.8) };
     } catch (e) {
       console.error("PDF Parsing Error:", e);
       return { type: "text", content: "" };
@@ -964,10 +983,26 @@
   async function callGemini(apiKey, parsedContent) {
     const cleanKey = apiKey.trim().replace(/^["']|["']$/g, '');
 
-    const systemPrompt = `You are an expert ERP Purchase Order Data Extractor.
-Extract procurement items into valid JSON strictly following this schema:
+    const systemPrompt = `You are an expert ERP Procurement Data Extraction Specialist.
+Analyze the document and extract details ONLY IF IT IS A STRICTLY CONFIRMED PURCHASE ORDER / WORK ORDER.
+
+RULES FOR EXTRACTION:
+1. "isStrictConfirmedPO": Set to true ONLY if the document explicitly has "Purchase Order", "PO Number", "P.O. No", "Work Order", "Supply Order". 
+   - If it is an Invoice, Tax Invoice, Delivery Challan, Quote/Quotation without Order No, Receipt, or Payment Slip, set "isStrictConfirmedPO": false and items: [].
+2. BUYER / CLIENT:
+   - "buyerCompanyName": The company issuing this PO (Buyer / Bill To). Never output "Classic Automation".
+   - "buyerBillingAddress": Extract the exact printed billing/delivery address of the BUYER. Never use generic defaults.
+3. PO DETAILS:
+   - "poNumber": The exact Purchase Order number.
+   - "poDate": The date of the PO document.
+4. STRICT PART NUMBER / ITEM CODE RULE:
+   - "partNo": Extract the exact catalog number / part number / item code ONLY IF it is explicitly stated in a dedicated column or clearly labelled (e.g., Cat No, Model No, Item Code, Part Number, Material Code).
+   - CRITICAL: DO NOT GUESS OR INFER THE PART NUMBER FROM THE DESCRIPTION. If there is no explicit part number/code, leave "partNo": "" (empty string). Do not use pure ratings like "10A" or "415V" as partNo.
+5. "items": Extract line items (partNo, desc, qty, unit, rate, discountPercent, discountAmount, amount).
+
+Return STRICTLY raw JSON:
 {
-  "isPurchaseOrder": true,
+  "isStrictConfirmedPO": true,
   "buyerCompanyName": "...",
   "buyerBillingAddress": "...",
   "poNumber": "...",
@@ -984,21 +1019,14 @@ Extract procurement items into valid JSON strictly following this schema:
       "amount": "0.00"
     }
   ]
-}
-
-RULES:
-1. Documents can be Purchase Orders, Work Orders, Indents, Supply Orders, or LOIs. Extract items from all of these.
-2. Mark isPurchaseOrder: false ONLY if strictly an invoice, bill, or receipt.
-3. If table items exist, extract all of them into the "items" array.
-4. "Classic Automation" is the vendor. Extract the buyer/client name & address.
-5. Return strictly a raw JSON object, no Markdown ticks.`;
+}`;
 
     let contentsParts = [];
 
     if (parsedContent.type === "image") {
       const pureBase64 = parsedContent.content.split(',')[1] || parsedContent.content;
       contentsParts = [
-        { text: systemPrompt + "\nExtract PO line items from this scanned document image:" },
+        { text: systemPrompt + "\nExtract confirmed purchase order data from this document image:" },
         {
           inline_data: {
             mime_type: "image/jpeg",
@@ -1008,7 +1036,7 @@ RULES:
       ];
     } else {
       contentsParts = [
-        { text: systemPrompt + "\nDocument content:\n\n" + parsedContent.content }
+        { text: systemPrompt + "\nDocument text content:\n\n" + parsedContent.content }
       ];
     }
 
@@ -1019,7 +1047,6 @@ RULES:
       }
     };
 
-    // Primary Gemini 3.6 Flash endpoints with seamless fallback
     const candidateEndpoints = [
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${cleanKey}`,
       `https://generativelanguage.googleapis.com/v1/models/gemini-3.6-flash:generateContent?key=${cleanKey}`,
@@ -1070,15 +1097,17 @@ RULES:
     }
 
     const itemsArray = Array.isArray(data.items) ? data.items : [];
-    if (data.isPurchaseOrder === false && itemsArray.length === 0) {
-      return { isPurchaseOrder: false };
+    const isConfirmed = data.isStrictConfirmedPO === true && itemsArray.length > 0 && !!data.poNumber && data.poNumber !== "N/A";
+
+    if (!isConfirmed) {
+      return { isStrictConfirmedPO: false, items: [] };
     }
 
     return {
-      isPurchaseOrder: true,
+      isStrictConfirmedPO: true,
       companyName: (data.buyerCompanyName || "").trim(),
-      companyAddress: (data.buyerBillingAddress || "").trim(),
-      poNo: (data.poNumber || "PO-" + Math.floor(1000 + Math.random() * 9000)).trim(),
+      companyAddress: sanitizeBuyerAddress(data.buyerBillingAddress),
+      poNo: String(data.poNumber || "").trim(),
       poDate: (data.poDate || "").trim(),
       items: itemsArray.map(it => {
         function cleanNumberString(val) {
@@ -1113,8 +1142,11 @@ RULES:
         if (r === 0 && a > 0) r = a / q;
         if (a === 0 && r > 0) a = (q * r) - da;
 
+        // 100% STRICT VALIDATION CALL FOR PART NO
+        const validatedPartNo = detectAndValidatePartNumber(it.partNo);
+
         return {
-          partNo: (it.partNo || "").trim(),
+          partNo: validatedPartNo,
           desc: (it.desc || "Item Description").trim(),
           qty: q.toString(),
           unit: (it.unit || "NOS").trim().toUpperCase(),
@@ -1166,7 +1198,7 @@ RULES:
           continue;
         }
 
-        statusText.textContent = `[${processedTotal + 1}/${fileList.length}] Extracting via Gemini 3.6: ${fileName}...`;
+        statusText.textContent = `[${processedTotal + 1}/${fileList.length}] Checking & Extracting: ${fileName}...`;
 
         try {
           const parsedContent = await parsePdfContent(fileObj.base64);
@@ -1181,11 +1213,10 @@ RULES:
           const extractedData = await callGemini(apiKey, parsedContent);
           const items = Array.isArray(extractedData?.items) ? extractedData.items : [];
 
-          const isFirmNonPo = extractedData?.isPurchaseOrder === false && items.length === 0;
-          if (!extractedData || isFirmNonPo || items.length === 0) {
+          if (!extractedData.isStrictConfirmedPO || items.length === 0) {
             skippedCount++;
             processedTotal++;
-            statusText.textContent = `[${processedTotal}/${fileList.length}] Skipped Non-PO / No items found: ${fileName}`;
+            statusText.textContent = `[${processedTotal}/${fileList.length}] Skipped (Not a confirmed PO / Invoice): ${fileName}`;
             continue;
           }
 
@@ -1204,18 +1235,10 @@ RULES:
           }
 
           let resolvedCompany = String(extractedData.companyName || "").trim();
-          let resolvedAddress = sanitizeBuyerAddress(extractedData.companyAddress);
+          let resolvedAddress = extractedData.companyAddress || "";
 
-          if (resolvedCompany.toLowerCase().includes("classic automation")) {
-            resolvedCompany = "";
-          }
-
-          if ((!resolvedCompany || resolvedCompany.length < 3) && resolvedAddress.toLowerCase().includes("pantnagar")) {
-            resolvedCompany = "SWG INDUSTRIES LIMITED";
-          }
-
-          if (!resolvedCompany || resolvedCompany.length < 2) {
-            resolvedCompany = "Client / Buyer Organization";
+          if (resolvedCompany.toLowerCase().includes("classic automation") || resolvedCompany.length < 2) {
+            resolvedCompany = "Buyer Organization";
           }
 
           if (extractedPoNo) {
@@ -1229,16 +1252,14 @@ RULES:
             const currentTotal = tableBody.querySelectorAll('tr').length + 1;
             newlyExtracted++;
 
-            const finalPartNo = detectAndValidatePartNumber(item.partNo, item.desc);
-
             const newRow = addRowToTable({
               sNo: currentTotal,
               company: resolvedCompany,
               address: resolvedAddress,
-              poNo: extractedData.poNo || "N/A",
+              poNo: extractedData.poNo,
               poDate: rawDocPoDate,
               gmailDate: formattedGmailDate,
-              partNo: finalPartNo,
+              partNo: item.partNo, // 100% strict validated partNo (or empty string)
               desc: item.desc || "",
               qty: item.qty || "1",
               unit: item.unit || "NOS",
@@ -1293,9 +1314,9 @@ RULES:
     if (abortRequested) {
       statusText.textContent = `Stopped. Extracted ${newlyExtracted} item(s).`;
     } else if (failedCount > 0) {
-      statusText.textContent = `Completed with errors. Extracted: ${newlyExtracted} items | Errors: ${failedCount} files | Skipped: ${skippedCount}`;
+      statusText.textContent = `Completed with errors. Extracted: ${newlyExtracted} items | Errors: ${failedCount} files | Skipped Non-POs: ${skippedCount}`;
     } else {
-      statusText.textContent = `Done! Extracted: ${newlyExtracted} items | Skipped: ${skippedCount} non-PO files.`;
+      statusText.textContent = `Done! Extracted: ${newlyExtracted} verified PO items | Skipped: ${skippedCount} non-PO files.`;
     }
   }
 
