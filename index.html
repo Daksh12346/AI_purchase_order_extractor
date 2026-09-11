@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AI Purchase Order Extractor (Gemini AI)</title>
+  <title>AI Purchase Order Extractor (Gemini 3.6 Flash)</title>
   <!-- XLSX Library -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <!-- PDF.js Engine -->
@@ -454,7 +454,7 @@
 <div class="container">
   <div class="header-box">
     <h1>AI Purchase Order Extractor</h1>
-    <p class="subtitle">Procurement Automation Powered by Google Gemini AI (Free-tier)</p>
+    <p class="subtitle">Procurement Automation Powered by Google Gemini 3.6 Flash</p>
 
     <div class="api-key-container">
       <div class="api-key-box">
@@ -961,7 +961,6 @@
     }
   }
 
-  // Universal Gemini caller with automated fallback endpoints
   async function callGemini(apiKey, parsedContent) {
     const cleanKey = apiKey.trim().replace(/^["']|["']$/g, '');
 
@@ -1016,16 +1015,15 @@ RULES:
     const payload = {
       contents: [{ parts: contentsParts }],
       generationConfig: {
-        temperature: 0.1,
         response_mime_type: "application/json"
       }
     };
 
-    // Sequential fallback endpoints for universal compatibility
+    // Primary Gemini 3.6 Flash endpoints with seamless fallback
     const candidateEndpoints = [
-      `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${cleanKey}`,
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${cleanKey}`,
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${cleanKey}`
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${cleanKey}`,
+      `https://generativelanguage.googleapis.com/v1/models/gemini-3.6-flash:generateContent?key=${cleanKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${cleanKey}`
     ];
 
     let lastError = null;
@@ -1045,7 +1043,6 @@ RULES:
         } else {
           const errData = await response.json().catch(() => ({}));
           lastError = new Error(errData.error?.message || `HTTP ${response.status}`);
-          // If 404 model not found, loop to next fallback endpoint
           if (response.status !== 404) {
             throw lastError;
           }
@@ -1169,7 +1166,7 @@ RULES:
           continue;
         }
 
-        statusText.textContent = `[${processedTotal + 1}/${fileList.length}] Extracting via Gemini: ${fileName}...`;
+        statusText.textContent = `[${processedTotal + 1}/${fileList.length}] Extracting via Gemini 3.6: ${fileName}...`;
 
         try {
           const parsedContent = await parsePdfContent(fileObj.base64);
