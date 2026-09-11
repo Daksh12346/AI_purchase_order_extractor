@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AI Purchase Order Extractor</title>
+  <title>AI Purchase Order Extractor (Gemini Powered)</title>
   <!-- XLSX Library -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <!-- PDF.js Engine -->
@@ -11,8 +11,8 @@
 
   <style>
     :root {
-      --primary: #10A37F;
-      --primary-dark: #0E8A6C;
+      --primary: #1A73E8;
+      --primary-dark: #1557B0;
       --border: #D9DEE3;
       --bg: #F4F6F8;
       --ink: #16202A;
@@ -56,10 +56,10 @@
 
     .api-key-container {
       margin-bottom: 16px;
-      background: #F8FAF9;
+      background: #F8FAFD;
       padding: 14px;
       border-radius: 6px;
-      border: 1.5px solid #C1DDD6;
+      border: 1.5px solid #C2D7FA;
     }
 
     .api-key-box {
@@ -91,8 +91,8 @@
     }
 
     .filter-section-pre {
-      background: #F8FAF9;
-      border: 1.5px solid #C1DDD6;
+      background: #F8FAFD;
+      border: 1.5px solid #C2D7FA;
       border-radius: 6px;
       padding: 16px 20px;
       margin-bottom: 16px;
@@ -164,8 +164,8 @@
     }
 
     .gmail-box {
-      background: #EBF3F2;
-      border: 1px solid #B2D8D1;
+      background: #EDF4FE;
+      border: 1px solid #B8D3F9;
       border-radius: 6px;
       padding: 14px 18px;
       margin-bottom: 16px;
@@ -237,8 +237,8 @@
     .btn-main:hover { background: var(--primary-dark); }
     .btn-main:disabled { background: #A8B0B8; cursor: not-allowed; }
 
-    .btn-gmail { background: #1A73E8; }
-    .btn-gmail:hover { background: #1557B0; }
+    .btn-gmail { background: #0F9D58; }
+    .btn-gmail:hover { background: #0B8043; }
 
     .btn-stop {
       background: #C62828;
@@ -453,13 +453,13 @@
 
 <div class="container">
   <div class="header-box">
-    <h1>AI Purchase Order Extractor</h1>
-    <p class="subtitle">Complete Procurement System (Optimized OpenAI GPT-4o / GPT-4o-mini)</p>
+    <h1>AI Purchase Order Extractor (Gemini Pro / Flash)</h1>
+    <p class="subtitle">Direct PDF / Gmail Pipeline with Free-Tier Gemini API</p>
 
     <div class="api-key-container">
       <div class="api-key-box">
-        <label for="apiKeyInput">🔑 OpenAI API Key:</label>
-        <input type="password" id="apiKeyInput" placeholder="Paste OpenAI API Key (sk-...)">
+        <label for="apiKeyInput">🔑 Google Gemini API Key:</label>
+        <input type="password" id="apiKeyInput" placeholder="Paste Gemini API Key (AIzaSy...)">
       </div>
     </div>
 
@@ -519,7 +519,7 @@
       <button type="button" class="btn-secondary" id="clearHistoryBtn" title="Deletes backend memory of processed POs">🗑 Reset Processed PO History</button>
     </div>
 
-    <div class="status-text" id="statusText">Ready. Provide OpenAI API Key and select files or sync Gmail.</div>
+    <div class="status-text" id="statusText">Ready. Provide Google Gemini API Key and select files or sync Gmail.</div>
     <div class="error-banner" id="errorBanner"></div>
   </div>
 
@@ -627,8 +627,8 @@
 
   const BACKEND_BASE = window.location.origin;
 
-  if (localStorage.getItem('openai_api_key')) {
-    apiKeyInput.value = localStorage.getItem('openai_api_key');
+  if (localStorage.getItem('gemini_api_key')) {
+    apiKeyInput.value = localStorage.getItem('gemini_api_key');
   }
 
   if (localStorage.getItem('gmail_email')) {
@@ -636,7 +636,7 @@
   }
 
   apiKeyInput.addEventListener('input', () => {
-    localStorage.setItem('openai_api_key', apiKeyInput.value.trim());
+    localStorage.setItem('gemini_api_key', apiKeyInput.value.trim());
     errorBanner.style.display = 'none';
   });
   gmailEmail.addEventListener('input', () => {
@@ -947,7 +947,6 @@
         return { type: "text", content: textContent.trim() };
       }
 
-      // Safe lightweight canvas rendering (Scale 1.2 to avoid 413 Payload Too Large)
       const firstPage = await pdf.getPage(1);
       const viewport = firstPage.getViewport({ scale: 1.2 });
       const canvas = document.createElement('canvas');
@@ -955,11 +954,160 @@
       canvas.width = viewport.width;
       canvas.height = viewport.height;
       await firstPage.render({ canvasContext: ctx, viewport: viewport }).promise;
-      return { type: "image", content: canvas.toDataURL('image/jpeg', 0.7) };
+      return { type: "image", content: canvas.toDataURL('image/jpeg', 0.75) };
     } catch (e) {
       console.error("PDF Parsing Error:", e);
       return { type: "text", content: "" };
     }
+  }
+
+  async function callGemini(apiKey, parsedContent) {
+    const cleanKey = apiKey.trim().replace(/^["']|["']$/g, '');
+
+    const systemPrompt = `You are an expert ERP Purchase Order Data Extractor.
+Extract procurement items into valid JSON strictly following this schema:
+{
+  "isPurchaseOrder": true,
+  "buyerCompanyName": "...",
+  "buyerBillingAddress": "...",
+  "poNumber": "...",
+  "poDate": "...",
+  "items": [
+    {
+      "partNo": "...",
+      "desc": "...",
+      "qty": "1",
+      "unit": "NOS",
+      "rate": "0.00",
+      "discountPercent": "0",
+      "discountAmount": "0.00",
+      "amount": "0.00"
+    }
+  ]
+}
+
+RULES:
+1. Documents can be Purchase Orders, Work Orders, Indents, Supply Orders, or LOIs. Extract items from all of these.
+2. Mark isPurchaseOrder: false ONLY if strictly an invoice, bill, or receipt.
+3. If table items exist, extract all of them into the "items" array.
+4. "Classic Automation" is the vendor. Extract the buyer/client name & address.
+5. Return strictly a raw JSON object, no Markdown ticks.`;
+
+    let contentsParts = [];
+
+    if (parsedContent.type === "image") {
+      const pureBase64 = parsedContent.content.split(',')[1] || parsedContent.content;
+      contentsParts = [
+        { text: systemPrompt + "\nExtract PO line items from this scanned document image:" },
+        {
+          inline_data: {
+            mime_type: "image/jpeg",
+            data: pureBase64
+          }
+        }
+      ];
+    } else {
+      contentsParts = [
+        { text: systemPrompt + "\nDocument content:\n\n" + parsedContent.content }
+      ];
+    }
+
+    // Direct Gemini 1.5 Flash API endpoint
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${cleanKey}`;
+
+    let response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: contentsParts }],
+          generationConfig: {
+            temperature: 0.1,
+            response_mime_type: "application/json"
+          }
+        })
+      });
+    } catch (netErr) {
+      throw new Error(`Connection Error: ${netErr.message}`);
+    }
+
+    if (!response.ok) {
+      const errData = await response.json().catch(() => ({}));
+      const msg = errData.error?.message || `HTTP ${response.status}`;
+      if (response.status === 400 && msg.includes("API key")) {
+        throw new Error("Invalid Gemini API Key. Please get a free key from Google AI Studio.");
+      }
+      throw new Error(msg);
+    }
+
+    const resJson = await response.json();
+    const candidateText = resJson.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+
+    let data = {};
+    try {
+      data = JSON.parse(candidateText);
+    } catch (e) {
+      const match = candidateText.match(/\{[\s\S]*\}/);
+      if (match) data = JSON.parse(match[0]);
+    }
+
+    const itemsArray = Array.isArray(data.items) ? data.items : [];
+    if (data.isPurchaseOrder === false && itemsArray.length === 0) {
+      return { isPurchaseOrder: false };
+    }
+
+    return {
+      isPurchaseOrder: true,
+      companyName: (data.buyerCompanyName || "").trim(),
+      companyAddress: (data.buyerBillingAddress || "").trim(),
+      poNo: (data.poNumber || "PO-" + Math.floor(1000 + Math.random() * 9000)).trim(),
+      poDate: (data.poDate || "").trim(),
+      items: itemsArray.map(it => {
+        function cleanNumberString(val) {
+          if (val === undefined || val === null) return "0";
+          let str = String(val).trim().replace(/[₹RsINR$\s/A-Za-z]/g, '');
+
+          if (str.includes(',') && str.includes('.')) {
+            if (str.lastIndexOf('.') > str.lastIndexOf(',')) {
+              str = str.replace(/,/g, '');
+            } else {
+              str = str.replace(/\./g, '').replace(',', '.');
+            }
+          } else if (str.includes(',')) {
+            const commaParts = str.split(',');
+            if (commaParts.length === 2 && commaParts[1].length === 2) {
+              str = commaParts[0] + '.' + commaParts[1];
+            } else {
+              str = str.replace(/,/g, '');
+            }
+          }
+          str = str.replace(/[^0-9.]/g, '');
+          return str || "0";
+        }
+
+        let q = parseFloat(cleanNumberString(it.qty)) || 1;
+        let r = parseFloat(cleanNumberString(it.rate)) || 0;
+        let dp = parseFloat(cleanNumberString(it.discountPercent)) || 0;
+        let da = parseFloat(cleanNumberString(it.discountAmount)) || 0;
+        let a = parseFloat(cleanNumberString(it.amount)) || 0;
+
+        if (q <= 0) q = 1;
+        if (r === 0 && a > 0) r = a / q;
+        if (a === 0 && r > 0) a = (q * r) - da;
+
+        return {
+          partNo: (it.partNo || "").trim(),
+          desc: (it.desc || "Item Description").trim(),
+          qty: q.toString(),
+          unit: (it.unit || "NOS").trim().toUpperCase(),
+          rate: r.toFixed(2),
+          discountPercent: dp > 0 ? dp.toString() : "0",
+          discountAmount: da > 0 ? da.toFixed(2) : "0.00",
+          amount: a.toFixed(2)
+        };
+      })
+    };
   }
 
   async function processPdfItems(fileList, apiKey, alreadyProcessedSet = new Set(), forceReprocess = false) {
@@ -1001,7 +1149,7 @@
           continue;
         }
 
-        statusText.textContent = `[${processedTotal + 1}/${fileList.length}] Reading & Extracting: ${fileName}...`;
+        statusText.textContent = `[${processedTotal + 1}/${fileList.length}] Extracting via Gemini: ${fileName}...`;
 
         try {
           const parsedContent = await parsePdfContent(fileObj.base64);
@@ -1013,7 +1161,7 @@
             continue;
           }
 
-          const extractedData = await callOpenAI(apiKey, parsedContent);
+          const extractedData = await callGemini(apiKey, parsedContent);
           const items = Array.isArray(extractedData?.items) ? extractedData.items : [];
 
           const isFirmNonPo = extractedData?.isPurchaseOrder === false && items.length === 0;
@@ -1108,7 +1256,7 @@
           failedCount++;
           processedTotal++;
           errorBanner.style.display = 'block';
-          errorBanner.innerHTML = `<strong>Last API Error:</strong> ${docErr.message}<br><small>Check OpenAI quota/balance or API Key permissions.</small>`;
+          errorBanner.innerHTML = `<strong>Last API Error:</strong> ${docErr.message}<br><small>Ensure valid Gemini API Key from Google AI Studio.</small>`;
           statusText.textContent = `❌ Error on ${fileName}: ${docErr.message}`;
         }
       }
@@ -1128,7 +1276,7 @@
     if (abortRequested) {
       statusText.textContent = `Stopped. Extracted ${newlyExtracted} item(s).`;
     } else if (failedCount > 0) {
-      statusText.textContent = `Completed with errors. Extracted: ${newlyExtracted} items | API Errors: ${failedCount} files | Skipped: ${skippedCount}`;
+      statusText.textContent = `Completed with errors. Extracted: ${newlyExtracted} items | Errors: ${failedCount} files | Skipped: ${skippedCount}`;
     } else {
       statusText.textContent = `Done! Extracted: ${newlyExtracted} items | Skipped: ${skippedCount} non-PO files.`;
     }
@@ -1140,7 +1288,7 @@
     const passVal = gmailPassword.value.trim();
     const forceReprocess = forceReprocessCheck.checked;
 
-    if (!key) return alert("Please enter OpenAI API Key.");
+    if (!key) return alert("Please enter Gemini API Key.");
     if (!emailVal || !passVal) return alert("Please enter Gmail Address & App Password.");
 
     fetchGmailBtn.disabled = true;
@@ -1197,7 +1345,7 @@
 
   processBtn.addEventListener('click', async () => {
     const key = apiKeyInput.value.trim();
-    if (!key) return alert("Enter OpenAI API key.");
+    if (!key) return alert("Enter Gemini API key.");
     if (!pdfInput.files || pdfInput.files.length === 0) return alert("Select files first.");
 
     processBtn.disabled = true;
@@ -1237,161 +1385,6 @@
       reader.onload = () => resolve(reader.result.split(',')[1]);
       reader.onerror = reject;
     });
-  }
-
-  async function callOpenAI(apiKey, parsedContent) {
-    const cleanKey = apiKey.trim().replace(/^["']|["']$/g, '');
-
-    const systemPrompt = `You are an expert ERP Purchase Order Data Extractor.
-Extract procurement items into valid JSON.
-RULES:
-1. Documents can be Purchase Orders, Work Orders, Supply Orders, Indents, or LOIs. Extract items from all of these.
-2. Mark "isPurchaseOrder": false ONLY if the document is strictly a Tax Invoice, Retail Bill, or Delivery Challan.
-3. If valid item details exist, extract them into the "items" array.
-4. "Classic Automation" is the vendor/seller. Extract the CLIENT / BUYER organization name and billing address.
-5. Return strictly a JSON object:
-{
-  "isPurchaseOrder": true,
-  "buyerCompanyName": "...",
-  "buyerBillingAddress": "...",
-  "poNumber": "...",
-  "poDate": "...",
-  "items": [
-    {
-      "partNo": "...",
-      "desc": "...",
-      "qty": "1",
-      "unit": "NOS",
-      "rate": "0.00",
-      "discountPercent": "0",
-      "discountAmount": "0.00",
-      "amount": "0.00"
-    }
-  ]
-}`;
-
-    const userMessageContent = [];
-
-    if (parsedContent.type === "image") {
-      userMessageContent.push({
-        type: "text",
-        text: "Extract all purchase order line items from this scanned document image in strict JSON."
-      });
-      userMessageContent.push({
-        type: "image_url",
-        image_url: { url: parsedContent.content }
-      });
-    } else {
-      userMessageContent.push({
-        type: "text",
-        text: `Extract all purchase order line items from this document text in strict JSON:\n\n${parsedContent.content}`
-      });
-    }
-
-    let response;
-    try {
-      response = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${cleanKey}`
-        },
-        body: JSON.stringify({
-          model: "gpt-4o-mini",
-          response_format: { type: "json_object" },
-          temperature: 0.1,
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: userMessageContent }
-          ]
-        })
-      });
-    } catch (netErr) {
-      throw new Error(`Network/CORS Error: Could not connect to OpenAI API (${netErr.message})`);
-    }
-
-    if (!response.ok) {
-      const errData = await response.json().catch(() => ({}));
-      const rawMsg = errData.error?.message || `HTTP ${response.status} ${response.statusText}`;
-      if (response.status === 401) {
-        throw new Error("Invalid API Key (HTTP 401). Verify key on OpenAI platform.");
-      }
-      if (response.status === 429) {
-        throw new Error("OpenAI Quota Exceeded (HTTP 429). Add prepaid credits to your account.");
-      }
-      if (response.status === 413) {
-        throw new Error("Payload Too Large (HTTP 413). Scanned PDF image size exceeded limit.");
-      }
-      throw new Error(rawMsg);
-    }
-
-    const resJson = await response.json();
-    const candidateText = resJson.choices?.[0]?.message?.content || "{}";
-
-    let data = {};
-    try {
-      data = JSON.parse(candidateText);
-    } catch (e) {
-      const match = candidateText.match(/\{[\s\S]*\}/);
-      if (match) data = JSON.parse(match[0]);
-    }
-
-    const itemsArray = Array.isArray(data.items) ? data.items : [];
-    if (data.isPurchaseOrder === false && itemsArray.length === 0) {
-      return { isPurchaseOrder: false };
-    }
-
-    return {
-      isPurchaseOrder: true,
-      companyName: (data.buyerCompanyName || "").trim(),
-      companyAddress: (data.buyerBillingAddress || "").trim(),
-      poNo: (data.poNumber || "PO-" + Math.floor(1000 + Math.random() * 9000)).trim(),
-      poDate: (data.poDate || "").trim(),
-      items: itemsArray.map(it => {
-        function cleanNumberString(val) {
-          if (val === undefined || val === null) return "0";
-          let str = String(val).trim().replace(/[₹RsINR$\s/A-Za-z]/g, '');
-
-          if (str.includes(',') && str.includes('.')) {
-            if (str.lastIndexOf('.') > str.lastIndexOf(',')) {
-              str = str.replace(/,/g, '');
-            } else {
-              str = str.replace(/\./g, '').replace(',', '.');
-            }
-          } else if (str.includes(',')) {
-            const commaParts = str.split(',');
-            if (commaParts.length === 2 && commaParts[1].length === 2) {
-              str = commaParts[0] + '.' + commaParts[1];
-            } else {
-              str = str.replace(/,/g, '');
-            }
-          }
-          str = str.replace(/[^0-9.]/g, '');
-          return str || "0";
-        }
-
-        let q = parseFloat(cleanNumberString(it.qty)) || 1;
-        let r = parseFloat(cleanNumberString(it.rate)) || 0;
-        let dp = parseFloat(cleanNumberString(it.discountPercent)) || 0;
-        let da = parseFloat(cleanNumberString(it.discountAmount)) || 0;
-        let a = parseFloat(cleanNumberString(it.amount)) || 0;
-
-        if (q <= 0) q = 1;
-        if (r === 0 && a > 0) r = a / q;
-        if (a === 0 && r > 0) a = (q * r) - da;
-
-        return {
-          partNo: (it.partNo || "").trim(),
-          desc: (it.desc || "Item Description").trim(),
-          qty: q.toString(),
-          unit: (it.unit || "NOS").trim().toUpperCase(),
-          rate: r.toFixed(2),
-          discountPercent: dp > 0 ? dp.toString() : "0",
-          discountAmount: da > 0 ? da.toFixed(2) : "0.00",
-          amount: a.toFixed(2)
-        };
-      })
-    };
   }
 
   function addRowToTable(data = {}) {
