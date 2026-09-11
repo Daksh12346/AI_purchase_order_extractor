@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AI Purchase Order Extractor (Gemini Powered)</title>
+  <title>AI Purchase Order Extractor (Gemini AI)</title>
   <!-- XLSX Library -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <!-- PDF.js Engine -->
@@ -453,8 +453,8 @@
 
 <div class="container">
   <div class="header-box">
-    <h1>AI Purchase Order Extractor (Gemini Pro / Flash)</h1>
-    <p class="subtitle">Direct PDF / Gmail Pipeline with Free-Tier Gemini API</p>
+    <h1>AI Purchase Order Extractor</h1>
+    <p class="subtitle">Procurement Automation Powered by Google Gemini AI (Free-tier)</p>
 
     <div class="api-key-container">
       <div class="api-key-box">
@@ -961,6 +961,7 @@
     }
   }
 
+  // Universal Gemini caller with automated fallback endpoints
   async function callGemini(apiKey, parsedContent) {
     const cleanKey = apiKey.trim().replace(/^["']|["']$/g, '');
 
@@ -1012,36 +1013,55 @@ RULES:
       ];
     }
 
-    // Direct Gemini 1.5 Flash API endpoint
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${cleanKey}`;
-
-    let response;
-    try {
-      response = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: contentsParts }],
-          generationConfig: {
-            temperature: 0.1,
-            response_mime_type: "application/json"
-          }
-        })
-      });
-    } catch (netErr) {
-      throw new Error(`Connection Error: ${netErr.message}`);
-    }
-
-    if (!response.ok) {
-      const errData = await response.json().catch(() => ({}));
-      const msg = errData.error?.message || `HTTP ${response.status}`;
-      if (response.status === 400 && msg.includes("API key")) {
-        throw new Error("Invalid Gemini API Key. Please get a free key from Google AI Studio.");
+    const payload = {
+      contents: [{ parts: contentsParts }],
+      generationConfig: {
+        temperature: 0.1,
+        response_mime_type: "application/json"
       }
-      throw new Error(msg);
+    };
+
+    // Sequential fallback endpoints for universal compatibility
+    const candidateEndpoints = [
+      `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${cleanKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${cleanKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${cleanKey}`
+    ];
+
+    let lastError = null;
+    let resJson = null;
+
+    for (const url of candidateEndpoints) {
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+
+        if (response.ok) {
+          resJson = await response.json();
+          break;
+        } else {
+          const errData = await response.json().catch(() => ({}));
+          lastError = new Error(errData.error?.message || `HTTP ${response.status}`);
+          // If 404 model not found, loop to next fallback endpoint
+          if (response.status !== 404) {
+            throw lastError;
+          }
+        }
+      } catch (err) {
+        lastError = err;
+        if (!err.message.includes("404") && !err.message.includes("not found")) {
+          throw err;
+        }
+      }
     }
 
-    const resJson = await response.json();
+    if (!resJson) {
+      throw lastError || new Error("Failed to reach Gemini API. Verify Key.");
+    }
+
     const candidateText = resJson.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
 
     let data = {};
