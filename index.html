@@ -969,7 +969,7 @@
     }
   }
 
-  // Auto-retrying Gemini API Call with 429 Quota Backoff
+  // Active Gemini 3.x Flash Models with Automatic Quota/RPM Retry
   async function callGemini(apiKey, parsedContent) {
     const cleanKey = apiKey.trim().replace(/^["']|["']$/g, '');
 
@@ -1037,10 +1037,11 @@ Return STRICTLY raw JSON:
       }
     };
 
+    // Active official Gemini 3.x Flash models only
     const candidateEndpoints = [
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${cleanKey}`,
-      `https://generativelanguage.googleapis.com/v1/models/gemini-3.6-flash:generateContent?key=${cleanKey}`,
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${cleanKey}`
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${cleanKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${cleanKey}`
     ];
 
     let lastError = null;
@@ -1068,25 +1069,25 @@ Return STRICTLY raw JSON:
           const errData = await response.json().catch(() => ({}));
           const errMsg = errData.error?.message || `HTTP ${response.status}`;
 
-          // Rate limit / Quota hit (429) -> Auto wait & retry
+          // Rate limit / Quota hit (429) -> Auto backoff and retry
           if (response.status === 429 || errMsg.toLowerCase().includes("quota") || errMsg.toLowerCase().includes("rate")) {
             retriesLeft--;
             statusText.textContent = `⏳ Gemini RPM rate limit hit. Pausing ${Math.round(delayMs / 1000)}s before auto-retrying...`;
             await sleep(delayMs);
-            delayMs += 2500; // exponential backoff
+            delayMs += 2500;
             continue;
           }
 
           lastError = new Error(errMsg);
-          if (response.status === 404) {
-            break; // Try next endpoint
+          if (response.status === 404 || errMsg.toLowerCase().includes("not available")) {
+            break; // Try next supported model
           } else {
             throw lastError;
           }
         } catch (err) {
           lastError = err;
           if (err.message.includes("stopped by user")) throw err;
-          if (!err.message.includes("404") && !err.message.includes("not found")) {
+          if (!err.message.includes("404") && !err.message.includes("not available")) {
             throw err;
           }
           break;
@@ -1193,7 +1194,6 @@ Return STRICTLY raw JSON:
       if (p && p.trim()) tableExistingPOs.add(p.trim().toUpperCase());
     });
 
-    // Sequential 1-by-1 processing for Gemini Free Tier to prevent 429
     for (let i = 0; i < fileList.length; i++) {
       if (abortRequested) break;
 
@@ -1300,7 +1300,7 @@ Return STRICTLY raw JSON:
 
         processedTotal++;
 
-        // Gentle 3-second delay between requests to remain strictly under the 20 RPM Free-tier limit
+        // Rate-limit buffer (3.5s) between requests
         if (i < fileList.length - 1) {
           await sleep(3500);
         }
