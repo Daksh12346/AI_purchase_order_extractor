@@ -6,7 +6,7 @@
   <title>AI Purchase Order Extractor</title>
   <!-- XLSX Library -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-  <!-- PDF.js Engine for OpenAI Compatibility -->
+  <!-- PDF.js Engine for Rendering & Text Extraction -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 
   <style>
@@ -484,7 +484,7 @@
         <input type="password" id="gmailPassword" placeholder="16-digit App Password">
 
         <label class="reprocess-toggle">
-          <input type="checkbox" id="forceReprocessCheck"> Force re-read already processed POs
+          <input type="checkbox" id="forceReprocessCheck" checked> Force re-read already processed POs
         </label>
 
         <button type="button" class="btn-main btn-gmail" id="fetchGmailBtn">🔍 Fetch & Extract from Gmail</button>
@@ -493,7 +493,7 @@
 
     <div class="upload-zone">
       <input type="file" id="pdfInput" accept=".pdf,application/pdf" multiple>
-      <div style="font-size: 12px; color: #888; margin-top: 6px;">Upload all PDF documents (invoices/bills will be automatically skipped)</div>
+      <div style="font-size: 12px; color: #888; margin-top: 6px;">Upload all PDF documents (Invoices/bills without orders will be safely skipped)</div>
     </div>
 
     <div class="action-buttons">
@@ -695,15 +695,6 @@
       }
     }
   });
-
-  async function countdownWait(seconds, reason = "Rate limit hit") {
-    let remaining = Math.ceil(seconds);
-    while (remaining > 0 && !abortRequested) {
-      statusText.textContent = `⏳ ${reason}. Waiting ${remaining}s before auto-retrying...`;
-      await sleep(1000);
-      remaining--;
-    }
-  }
 
   function isExplicitlyNonPoFile(filename) {
     if (!filename || typeof filename !== 'string') return false;
@@ -914,7 +905,7 @@
     updateNumbersAndCount();
   });
 
-  // Extract raw text or image from PDF in browser
+  // Extract raw text or high-scale rendered image from PDF in browser
   async function parsePdfContent(base64Pdf) {
     try {
       const binaryString = atob(base64Pdf);
@@ -927,7 +918,7 @@
       const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
       let textContent = "";
 
-      const pagesToRead = Math.min(pdf.numPages, 5);
+      const pagesToRead = Math.min(pdf.numPages, 4);
       for (let p = 1; p <= pagesToRead; p++) {
         const page = await pdf.getPage(p);
         const tokenized = await page.getTextContent();
@@ -935,13 +926,14 @@
         textContent += pageText + "\n";
       }
 
-      if (textContent.trim().length > 60) {
+      // If recognizable text is found, send as text
+      if (textContent && textContent.trim().length >= 40) {
         return { type: "text", content: textContent.trim() };
       }
 
-      // If scanned, render first page as image
+      // Fallback: If scanned or image-based, render page 1 at scale 2.0 for clear OCR
       const firstPage = await pdf.getPage(1);
-      const viewport = firstPage.getViewport({ scale: 1.5 });
+      const viewport = firstPage.getViewport({ scale: 2.0 });
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d');
       canvas.width = viewport.width;
@@ -949,6 +941,7 @@
       await firstPage.render({ canvasContext: ctx, viewport: viewport }).promise;
       return { type: "image", content: canvas.toDataURL('image/jpeg', 0.85) };
     } catch (e) {
+      console.error("PDF Parsing Error:", e);
       return { type: "text", content: "" };
     }
   }
@@ -984,6 +977,7 @@
         const fileObj = fileList[currentIndex];
         const fileName = (fileObj && (fileObj.name || fileObj.filename)) ? (fileObj.name || fileObj.filename) : `Document_${currentIndex + 1}.pdf`;
 
+        // Filename non-PO filter
         if (isExplicitlyNonPoFile(fileName)) {
           skippedCount++;
           processedTotal++;
@@ -995,19 +989,29 @@
 
         try {
           const parsedContent = await parsePdfContent(fileObj.base64);
-          const extractedData = await callOpenAI(apiKey, parsedContent);
 
-          const items = Array.isArray(extractedData?.items) ? extractedData.items : [];
-          if (!extractedData || (extractedData.isPurchaseOrder === false && items.length === 0)) {
+          if (!parsedContent.content) {
             skippedCount++;
             processedTotal++;
-            statusText.textContent = `[${processedTotal}/${fileList.length}] Skipped Non-PO / No items: ${fileName}`;
+            statusText.textContent = `[${processedTotal}/${fileList.length}] Blank / Unreadable PDF: ${fileName}`;
+            continue;
+          }
+
+          const extractedData = await callOpenAI(apiKey, parsedContent);
+          const items = Array.isArray(extractedData?.items) ? extractedData.items : [];
+
+          // Skip ONLY if model firmly flags as non-PO AND zero items were identified
+          const isFirmNonPo = extractedData?.isPurchaseOrder === false && items.length === 0;
+          if (!extractedData || isFirmNonPo || items.length === 0) {
+            skippedCount++;
+            processedTotal++;
+            statusText.textContent = `[${processedTotal}/${fileList.length}] Skipped Non-PO / No items found: ${fileName}`;
             continue;
           }
 
           const extractedPoNo = String(extractedData.poNo || "").trim().toUpperCase();
 
-          if (extractedPoNo && tableExistingPOs.has(extractedPoNo)) {
+          if (extractedPoNo && tableExistingPOs.has(extractedPoNo) && !forceReprocess) {
             processedTotal++;
             statusText.textContent = `[${processedTotal}/${fileList.length}] Already in table: ${extractedPoNo}`;
             continue;
@@ -1019,74 +1023,71 @@
             continue;
           }
 
-          if (items.length > 0) {
-            let resolvedCompany = String(extractedData.companyName || "").trim();
-            let resolvedAddress = sanitizeBuyerAddress(extractedData.companyAddress);
+          let resolvedCompany = String(extractedData.companyName || "").trim();
+          let resolvedAddress = sanitizeBuyerAddress(extractedData.companyAddress);
 
-            if (resolvedCompany.toLowerCase().includes("classic automation")) {
-              resolvedCompany = "";
-            }
+          if (resolvedCompany.toLowerCase().includes("classic automation")) {
+            resolvedCompany = "";
+          }
 
-            if ((!resolvedCompany || resolvedCompany.length < 3) && resolvedAddress.toLowerCase().includes("pantnagar")) {
-              resolvedCompany = "SWG INDUSTRIES LIMITED";
-            }
+          if ((!resolvedCompany || resolvedCompany.length < 3) && resolvedAddress.toLowerCase().includes("pantnagar")) {
+            resolvedCompany = "SWG INDUSTRIES LIMITED";
+          }
 
-            if (!resolvedCompany || resolvedCompany.length < 2) {
-              resolvedCompany = "Client / Buyer Organization";
-            }
+          if (!resolvedCompany || resolvedCompany.length < 2) {
+            resolvedCompany = "Client / Buyer Organization";
+          }
 
-            if (extractedPoNo) {
-              tableExistingPOs.add(extractedPoNo);
-            }
+          if (extractedPoNo) {
+            tableExistingPOs.add(extractedPoNo);
+          }
 
-            const formattedGmailDate = formatGmailDateToDDMMYY(fileObj.email_date);
-            const rawDocPoDate = extractedData.poDate || "";
+          const formattedGmailDate = formatGmailDateToDDMMYY(fileObj.email_date);
+          const rawDocPoDate = extractedData.poDate || "";
 
-            items.forEach(item => {
-              const currentTotal = tableBody.querySelectorAll('tr').length + 1;
-              newlyExtracted++;
+          items.forEach(item => {
+            const currentTotal = tableBody.querySelectorAll('tr').length + 1;
+            newlyExtracted++;
 
-              const finalPartNo = detectAndValidatePartNumber(item.partNo, item.desc);
+            const finalPartNo = detectAndValidatePartNumber(item.partNo, item.desc);
 
-              const newRow = addRowToTable({
-                sNo: currentTotal,
-                company: resolvedCompany,
-                address: resolvedAddress,
-                poNo: extractedData.poNo || "N/A",
-                poDate: rawDocPoDate,
-                gmailDate: formattedGmailDate,
-                partNo: finalPartNo,
-                desc: item.desc || "",
-                qty: item.qty || "1",
-                unit: item.unit || "NOS",
-                rate: item.rate || "0.00",
-                discountPercent: item.discountPercent || "0",
-                discountAmount: item.discountAmount || "0.00",
-                amount: item.amount || "0.00",
-                source: fileName
-              });
-
-              newRow.classList.add('newly-added');
-              setTimeout(() => newRow.classList.remove('newly-added'), 2000);
+            const newRow = addRowToTable({
+              sNo: currentTotal,
+              company: resolvedCompany,
+              address: resolvedAddress,
+              poNo: extractedData.poNo || "N/A",
+              poDate: rawDocPoDate,
+              gmailDate: formattedGmailDate,
+              partNo: finalPartNo,
+              desc: item.desc || "",
+              qty: item.qty || "1",
+              unit: item.unit || "NOS",
+              rate: item.rate || "0.00",
+              discountPercent: item.discountPercent || "0",
+              discountAmount: item.discountAmount || "0.00",
+              amount: item.amount || "0.00",
+              source: fileName
             });
 
-            updateNumbersAndCount();
+            newRow.classList.add('newly-added');
+            setTimeout(() => newRow.classList.remove('newly-added'), 2000);
+          });
 
-            const tableScrollContainer = document.querySelector('.table-scroll');
-            if (tableScrollContainer) {
-              tableScrollContainer.scrollTop = tableScrollContainer.scrollHeight;
-            }
+          updateNumbersAndCount();
 
-            if (extractedPoNo && !forceReprocess) {
-              fetch(`${BACKEND_BASE}/mark-processed`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ po_numbers: [extractedPoNo] })
-              }).catch(() => {});
-            }
-          } else {
-            skippedCount++;
+          const tableScrollContainer = document.querySelector('.table-scroll');
+          if (tableScrollContainer) {
+            tableScrollContainer.scrollTop = tableScrollContainer.scrollHeight;
           }
+
+          if (extractedPoNo && !forceReprocess) {
+            fetch(`${BACKEND_BASE}/mark-processed`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ po_numbers: [extractedPoNo] })
+            }).catch(() => {});
+          }
+
           processedTotal++;
         } catch (docErr) {
           failedCount++;
@@ -1221,10 +1222,10 @@
     const systemPrompt = `You are an expert ERP Purchase Order Data Extractor.
 Extract procurement items into valid JSON.
 RULES:
-1. If this document is strictly an invoice, challan, or receipt, set isPurchaseOrder: false.
-2. If it is a Purchase Order, Indent, Work Order, LOI, or Supply Contract, set isPurchaseOrder: true.
-3. Classic Automation is the vendor/seller. Extract the CLIENT / BUYER organization name and billing address.
-4. Extract all line items from the table: part number, description, quantity, rate, discount, and total amount.
+1. Documents can be Purchase Orders, Work Orders, Supply Orders, Indents, or LOIs. Extract items from all of these.
+2. Mark "isPurchaseOrder": false ONLY if the document is strictly a Tax Invoice, Retail Bill, or Delivery Challan.
+3. If valid item details or product tables exist, extract them into the "items" array.
+4. "Classic Automation" is the vendor/seller. Extract the CLIENT / BUYER organization name and billing address.
 5. Return strictly a JSON object:
 {
   "isPurchaseOrder": true,
